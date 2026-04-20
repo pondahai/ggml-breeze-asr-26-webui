@@ -1,6 +1,7 @@
 # ggml-breeze-asr-26-webui
 
 使用 `whisper.cpp` + `doggy8088/ggml-breeze-asr-26` 的可攜專案，clone 後可直接依 README 完成安裝與使用。
+<img width="907" height="445" alt="image" src="https://github.com/user-attachments/assets/c8a25824-c293-44cf-8fda-42846d7797b0" />
 
 ## 來源
 - 模型: https://huggingface.co/doggy8088/ggml-breeze-asr-26
