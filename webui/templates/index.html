@@ -1,0 +1,71 @@
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Breeze ASR 上傳測試</title>
+<style>
+body{font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;max-width:880px;margin:24px auto;padding:0 16px}
+.card{border:1px solid #ddd;border-radius:12px;padding:16px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{padding:8px 14px;border-radius:8px;border:1px solid #333;background:#111;color:#fff;cursor:pointer}
+button.secondary{background:#fff;color:#111}
+textarea{width:100%;min-height:220px} pre{white-space:pre-wrap;background:#f6f6f6;padding:10px;border-radius:8px}
+small{color:#666}
+</style></head><body>
+<h2>ggml-breeze-asr-26 音檔上傳測試</h2>
+<div class="card">
+  <div class="row">
+    <input id="file" type="file" accept=".wav,.mp3,.m4a,.flac,.ogg" />
+    <button id="go">開始轉錄</button>
+    <button id="cancel" class="secondary" disabled>取消</button>
+  </div>
+  <p id="status"></p>
+  <small id="paths"></small>
+  <h4>轉錄結果</h4>
+  <textarea id="text" placeholder="結果會出現在這裡"></textarea>
+  <h4>執行 Log（尾段）</h4>
+  <pre id="log"></pre>
+</div>
+<script>
+const statusEl=document.getElementById('status');
+const textEl=document.getElementById('text');
+const logEl=document.getElementById('log');
+const pathsEl=document.getElementById('paths');
+const btnGo=document.getElementById('go');
+const btnCancel=document.getElementById('cancel');
+let jobId=null, timer=null;
+
+function setBusy(b){ btnGo.disabled=b; btnCancel.disabled=!b; }
+
+async function poll(){
+  if(!jobId) return;
+  const r=await fetch(`/api/jobs/${jobId}`);
+  const j=await r.json();
+  if(!j.ok){ statusEl.textContent='查詢失敗'; return; }
+  statusEl.textContent = `狀態: ${j.status}，耗時 ${j.elapsed_sec}s，PID ${j.pid||'-'}`;
+  pathsEl.textContent = `上傳: ${j.input_path||''} | 結果: ${j.output_txt_path||''}`;
+  logEl.textContent = j.log_tail || '';
+  if(j.status==='done'){
+    textEl.value = j.text || '';
+    clearInterval(timer); timer=null; setBusy(false);
+  } else if(['failed','cancelled'].includes(j.status)){
+    clearInterval(timer); timer=null; setBusy(false);
+  }
+}
+
+btnGo.onclick=async()=>{
+  const f=document.getElementById('file').files[0];
+  if(!f){alert('請先選音檔');return}
+  const fd=new FormData(); fd.append('file',f);
+  statusEl.textContent='建立任務中...'; textEl.value=''; logEl.textContent=''; pathsEl.textContent='';
+  const r=await fetch('/api/transcribe',{method:'POST',body:fd});
+  const j=await r.json();
+  if(!j.ok){ statusEl.textContent='失敗: '+(j.error||'unknown'); return; }
+  jobId=j.job_id; setBusy(true);
+  statusEl.textContent=`任務已建立，job_id=${jobId}`;
+  await poll();
+  timer=setInterval(poll, 2000);
+};
+
+btnCancel.onclick=async()=>{
+  if(!jobId) return;
+  await fetch(`/api/jobs/${jobId}/cancel`, {method:'POST'});
+  await poll();
+};
+</script></body></html>
