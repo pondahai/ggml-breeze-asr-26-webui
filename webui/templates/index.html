@@ -12,11 +12,24 @@ small{color:#666}
 <div class="card">
   <div class="row">
     <input id="file" type="file" accept=".wav,.mp3,.m4a,.flac,.ogg" />
+    <select id="format">
+      <option value="txt">純文字 (TXT)</option>
+      <option value="srt">字幕檔 (SRT)</option>
+      <option value="vtt">字幕檔 (VTT)</option>
+    </select>
+    <label for="max_len" style="margin-left:8px">段落限長:</label>
+    <input id="max_len" type="number" value="20" style="width:50px" title="每個段落的最大字數" />
+    <label style="margin-left:8px"><input id="sow" type="checkbox" checked disabled /> 詞彙切分 (優化)</label>
     <button id="go">開始轉錄</button>
     <button id="cancel" class="secondary" disabled>取消</button>
   </div>
   <p id="status"></p>
-  <small id="paths"></small>
+  <div id="results" style="display:none">
+    <small id="paths"></small><br/>
+    <a id="link-txt" href="#" target="_blank" style="display:none">TXT</a>
+    <a id="link-srt" href="#" target="_blank" style="display:none">SRT</a>
+    <a id="link-vtt" href="#" target="_blank" style="display:none">VTT</a>
+  </div>
   <h4>轉錄結果</h4>
   <textarea id="text" placeholder="結果會出現在這裡"></textarea>
   <h4>執行 Log（尾段）</h4>
@@ -27,6 +40,7 @@ const statusEl=document.getElementById('status');
 const textEl=document.getElementById('text');
 const logEl=document.getElementById('log');
 const pathsEl=document.getElementById('paths');
+const resultsDiv=document.getElementById('results');
 const btnGo=document.getElementById('go');
 const btnCancel=document.getElementById('cancel');
 let jobId=null, timer=null;
@@ -39,10 +53,19 @@ async function poll(){
   const j=await r.json();
   if(!j.ok){ statusEl.textContent='查詢失敗'; return; }
   statusEl.textContent = `狀態: ${j.status}，耗時 ${j.elapsed_sec}s，PID ${j.pid||'-'}`;
-  pathsEl.textContent = `上傳: ${j.input_path||''} | 結果: ${j.output_txt_path||''}`;
+  pathsEl.textContent = `上傳: ${j.input_path||''}`;
   logEl.textContent = j.log_tail || '';
   if(j.status==='done'){
     textEl.value = j.text || '';
+    resultsDiv.style.display = 'block';
+    // Update links (we assume they exist if transcription is done)
+    const formats = ['txt', 'srt', 'vtt'];
+    formats.forEach(ext => {
+      const link = document.getElementById(`link-${ext}`);
+      link.href = `/api/jobs/${jobId}/download?ext=${ext}`;
+      link.style.display = 'inline';
+      link.textContent = `${ext.toUpperCase()} 下載`;
+    });
     clearInterval(timer); timer=null; setBusy(false);
   } else if(['failed','cancelled'].includes(j.status)){
     clearInterval(timer); timer=null; setBusy(false);
@@ -51,9 +74,15 @@ async function poll(){
 
 btnGo.onclick=async()=>{
   const f=document.getElementById('file').files[0];
+  const fmt=document.getElementById('format').value;
+  const maxLen=document.getElementById('max_len').value;
   if(!f){alert('請先選音檔');return}
-  const fd=new FormData(); fd.append('file',f);
+  const fd=new FormData();
+  fd.append('file',f);
+  fd.append('format',fmt);
+  fd.append('max_len',maxLen);
   statusEl.textContent='建立任務中...'; textEl.value=''; logEl.textContent=''; pathsEl.textContent='';
+  resultsDiv.style.display='none';
   const r=await fetch('/api/transcribe',{method:'POST',body:fd});
   const j=await r.json();
   if(!j.ok){ statusEl.textContent='失敗: '+(j.error||'unknown'); return; }

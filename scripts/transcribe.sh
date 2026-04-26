@@ -11,5 +11,8 @@ mkdir -p "$OUT_DIR"
 [ -f "$MODEL" ] || { echo "missing model, run: bash scripts/install.sh"; exit 1; }
 BASE="$(date +%s)-$(basename "$IN")"
 OUT_BASE="$OUT_DIR/${BASE%.*}"
-"$CLI" -m "$MODEL" -f "$IN" -otxt -of "$OUT_BASE" -nt
-echo "[OK] output: ${OUT_BASE}.txt"
+"$CLI" -m "$MODEL" -f "$IN" -otxt -osrt -ovtt -of "$OUT_BASE" -nt -ml 20 -l zh -sow
+echo "[OK] outputs:"
+echo "  - ${OUT_BASE}.txt"
+echo "  - ${OUT_BASE}.srt"
+echo "  - ${OUT_BASE}.vtt"

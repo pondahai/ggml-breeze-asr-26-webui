@@ -9,16 +9,29 @@ PORT="${PORT:-8013}"
 pkill -f "$APP" || true
 
 # if target port already occupied, stop that process to avoid false start
-if ss -ltnp | grep -q ":$PORT"; then
-  PIDS=$(ss -ltnp | awk -v p=":$PORT" '$4 ~ p {print $NF}' | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u)
-  for pid in $PIDS; do
-    kill "$pid" || true
-  done
-  sleep 1
+if command -v lsof >/dev/null; then
+  PIDS=$(lsof -t -i :"$PORT" || true)
+  if [ -n "$PIDS" ]; then
+    echo "Killing existing process on port $PORT: $PIDS"
+    kill $PIDS || true
+    sleep 1
+  fi
+elif command -v ss >/dev/null; then
+  if ss -ltnp | grep -q ":$PORT"; then
+    PIDS=$(ss -ltnp | awk -v p=":$PORT" '$4 ~ p {print $NF}' | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u)
+    for pid in $PIDS; do
+      kill "$pid" || true
+    done
+    sleep 1
+  fi
 fi
 
 nohup python3 "$APP" >"$LOG" 2>&1 &
 sleep 1
-ss -ltnp | grep ":$PORT" || true
+if command -v lsof >/dev/null; then
+  lsof -i :"$PORT" || true
+else
+  ss -ltnp | grep ":$PORT" || true
+fi
 echo "[OK] WebUI started: http://127.0.0.1:$PORT"
 echo "[LOG] $LOG"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from flask import Flask, request, render_template, jsonify
+from flask import Flask, request, render_template, jsonify, send_file
 from werkzeug.utils import secure_filename
 import subprocess, time, uuid, pathlib, threading, os, signal
 
@@ -37,6 +37,9 @@ def transcribe():
         return jsonify({'ok': False, 'error': '尚未安裝模型，先執行: bash scripts/install.sh'}), 400
 
     f = request.files.get('file')
+    fmt = request.form.get('format', 'txt')
+    max_len = request.form.get('max_len', '20')
+    use_vad = request.form.get('vad', '1') == '1'
     if not f or not f.filename:
         return jsonify({'ok': False, 'error': '請先選擇音檔'}), 400
 
@@ -50,15 +53,22 @@ def transcribe():
     log_path = LOG_DIR / f"{job_id}.log"
     f.save(in_path)
 
-    cmd = [str(WHISPER), '-m', str(MODEL), '-f', str(in_path), '-otxt', '-of', str(out_base), '-nt']
+    # Always generate txt, plus requested format if different
+    cmd = [str(WHISPER), '-m', str(MODEL), '-f', str(in_path), '-of', str(out_base), '-nt']
+    cmd.extend(['-l', 'zh', '-ml', str(max_len), '-sow'])
+    
+    cmd.append('-otxt')
+    if fmt == 'srt': cmd.append('-osrt')
+    if fmt == 'vtt': cmd.append('-ovtt')
+    
     logf = open(log_path, 'w', encoding='utf-8')
     proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, text=True)
 
     with lock:
         jobs[job_id] = {
             'id': job_id, 'status': 'running', 'start_ts': time.time(), 'pid': proc.pid,
-            'proc': proc, 'input_path': str(in_path), 'output_txt': str(out_base) + '.txt',
-            'log_path': str(log_path), 'returncode': None,
+            'proc': proc, 'input_path': str(in_path), 'output_base': str(out_base),
+            'log_path': str(log_path), 'returncode': None, 'requested_format': fmt
         }
     return jsonify({'ok': True, 'job_id': job_id, 'status': 'running'})
 
@@ -75,16 +85,31 @@ def job_status(job_id):
         j['returncode'] = rc
 
     txt = ''
-    if j['status'] == 'done' and pathlib.Path(j['output_txt']).exists():
-        txt = pathlib.Path(j['output_txt']).read_text(errors='ignore').strip()
+    main_output = j['output_base'] + '.' + j['requested_format']
+    if j['status'] == 'done' and pathlib.Path(main_output).exists():
+        txt = pathlib.Path(main_output).read_text(errors='ignore').strip()
 
     return jsonify({
         'ok': True, 'job_id': job_id, 'status': j['status'],
         'elapsed_sec': round(time.time() - j['start_ts'], 2),
         'returncode': j['returncode'], 'pid': j['pid'],
-        'input_path': j['input_path'], 'output_txt_path': j['output_txt'],
+        'input_path': j['input_path'], 
         'text': txt, 'log_tail': tail_text(j['log_path'], 50),
     })
+
+@app.get('/api/jobs/<job_id>/download')
+def job_download(job_id):
+    with lock:
+        j = jobs.get(job_id)
+    if not j or j['status'] != 'done':
+        return "Not found or not ready", 404
+    
+    ext = request.args.get('ext', 'txt')
+    target = pathlib.Path(j['output_base'] + '.' + ext)
+    if not target.exists():
+        return f"Format {ext} not available", 404
+    
+    return send_file(target, as_attachment=True)
 
 @app.post('/api/jobs/<job_id>/cancel')
 def job_cancel(job_id):
