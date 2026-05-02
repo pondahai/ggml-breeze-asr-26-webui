@@ -1,0 +1,32 @@
+# Build artifacts and binaries
+third_party/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Models
+*.bin
+
+# Archives
+*.zip
+*.tar.gz
+*.7z
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+
+# Environment and logs
+.env
+*.log
+
+# IDEs
+.vscode/
+.idea/
+.DS_Store
