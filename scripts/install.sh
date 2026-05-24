@@ -7,12 +7,13 @@ MODEL_URL="https://huggingface.co/doggy8088/ggml-breeze-asr-26/resolve/main/ggml
 
 if [[ "$OSTYPE" == "darwin"* ]]; then
   echo "[OS] macOS detected"
-  brew install cmake curl python
-  pip3 install flask
+  brew install cmake curl python ffmpeg
+  pip3 install flask waitress
 else
   echo "[OS] Linux detected"
   sudo apt-get update
-  sudo apt-get install -y build-essential cmake curl python3-flask
+  sudo apt-get install -y build-essential cmake curl python3-flask ffmpeg
+  pip3 install waitress
 fi
 
 mkdir -p "$PROJECT_ROOT/third_party"

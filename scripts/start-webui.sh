@@ -26,7 +26,7 @@ elif command -v ss >/dev/null; then
   fi
 fi
 
-nohup python3 "$APP" >"$LOG" 2>&1 &
+nohup env PYTHONUNBUFFERED=1 python3 "$APP" >"$LOG" 2>&1 &
 sleep 1
 if command -v lsof >/dev/null; then
   lsof -i :"$PORT" || true

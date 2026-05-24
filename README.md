@@ -43,7 +43,9 @@ bash scripts/transcribe.sh /path/to/audio.mp3
 ## 需求
 - Ubuntu/WSL2 或 macOS
 - Python 3
+- FFmpeg (用於音檔智慧切片)
 - 可用網路下載模型（約 2.9GB）
 
 ## 致謝
 - https://www.facebook.com/will.fans/posts/pfbid0Nc4mhy5ZpziLjcDMsXQbMbN3Auoy13h3bwmLGmk2wYBDbDyG7PMi8S39S5orAgALl
+.fans/posts/pfbid0Nc4mhy5ZpziLjcDMsXQbMbN3Auoy13h3bwmLGmk2wYBDbDyG7PMi8S39S5orAgALl

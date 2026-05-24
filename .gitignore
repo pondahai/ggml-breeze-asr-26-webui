@@ -25,6 +25,8 @@ ENV/
 # Environment and logs
 .env
 *.log
+webui/results/
+webui/uploads/
 
 # IDEs
 .vscode/

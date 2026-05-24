@@ -77,19 +77,72 @@ btnGo.onclick=async()=>{
   const fmt=document.getElementById('format').value;
   const maxLen=document.getElementById('max_len').value;
   if(!f){alert('請先選音檔');return}
-  const fd=new FormData();
-  fd.append('file',f);
-  fd.append('format',fmt);
-  fd.append('max_len',maxLen);
-  statusEl.textContent='建立任務中...'; textEl.value=''; logEl.textContent=''; pathsEl.textContent='';
+  
+  statusEl.textContent='準備上傳...'; textEl.value=''; logEl.textContent=''; pathsEl.textContent='';
   resultsDiv.style.display='none';
-  const r=await fetch('/api/transcribe',{method:'POST',body:fd});
-  const j=await r.json();
-  if(!j.ok){ statusEl.textContent='失敗: '+(j.error||'unknown'); return; }
-  jobId=j.job_id; setBusy(true);
-  statusEl.textContent=`任務已建立，job_id=${jobId}`;
-  await poll();
-  timer=setInterval(poll, 2000);
+  setBusy(true);
+
+  const chunkSize = 512 * 1024; // 512KB
+  const totalChunks = Math.ceil(f.size / chunkSize);
+  const uploadId = Date.now() + '-' + Math.random().toString(36).substring(2, 9);
+  
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * chunkSize;
+    const end = Math.min(start + chunkSize, f.size);
+    const chunk = f.slice(start, end);
+    
+    const fd = new FormData();
+    fd.append('upload_id', uploadId);
+    fd.append('chunk_index', i);
+    fd.append('file', chunk, 'chunk.bin'); 
+    
+    let success = false;
+    let retryCount = 0;
+    while (!success && retryCount < 10) {
+      try {
+        const response = await fetch('/api/upload_chunk', {
+          method: 'POST',
+          body: fd
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        success = true;
+      } catch (err) {
+        retryCount++;
+        if (retryCount >= 10) {
+          statusEl.textContent=`上傳失敗 (段 ${i+1}/${totalChunks}): ${err.message} (已重試10次)`;
+          setBusy(false);
+          return;
+        }
+        statusEl.textContent=`段 ${i+1}/${totalChunks} 失敗，正在自動重試 (${retryCount}/10)...`;
+        await new Promise(r => setTimeout(r, 1000 * retryCount)); // Exponential backoff
+      }
+    }
+    const percent = Math.round(((i + 1) / totalChunks) * 100);
+    statusEl.textContent = `檔案上傳中... ${percent}%`;
+    // small sleep between chunks to avoid congestion
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  statusEl.textContent = `伺服器組裝檔案中...`;
+  
+  const fd2 = new FormData();
+  fd2.append('upload_id', uploadId);
+  fd2.append('filename', f.name);
+  fd2.append('format', fmt);
+  fd2.append('max_len', maxLen);
+
+  try {
+    const r=await fetch('/api/transcribe',{method:'POST',body:fd2});
+    const j=await r.json();
+    if(!j.ok){ statusEl.textContent='失敗: '+(j.error||'unknown'); setBusy(false); return; }
+    jobId=j.job_id;
+    statusEl.textContent=`音檔上傳完成！開始分析與切片... (job_id=${jobId})`;
+    await poll();
+    timer=setInterval(poll, 2000);
+  } catch (err) {
+    statusEl.textContent='解析伺服器回應失敗';
+    setBusy(false);
+  }
 };
 
 btnCancel.onclick=async()=>{
