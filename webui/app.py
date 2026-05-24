@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-from flask import Flask, request, render_template, jsonify, send_file
+from flask import Flask, request, render_template, jsonify, send_file, Response, stream_with_context
 from werkzeug.utils import secure_filename
-import subprocess, time, uuid, pathlib, threading, os, signal
+import subprocess, time, uuid, pathlib, threading, os, signal, json, requests
 
 # Utilities for smart splitting
 from audio_utils import get_audio_duration, find_silences, calculate_splits, split_audio, merge_subtitles, merge_texts
@@ -30,6 +30,15 @@ def tail_text(path, n=40):
     lines = p.read_text(errors='ignore').splitlines()
     return '\n'.join(lines[-n:])
 
+def ensure_wav(in_path: pathlib.Path, wav_path: pathlib.Path):
+    if in_path.suffix.lower() == '.wav':
+        return in_path
+    cmd = ['ffmpeg', '-y', '-i', str(in_path), '-ac', '1', '-ar', '16000', str(wav_path)]
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if p.returncode != 0 or not wav_path.exists():
+        raise RuntimeError('ffmpeg convert failed: ' + (p.stderr or p.stdout)[-500:])
+    return wav_path
+
 def process_job_thread(job_id, in_path, out_base, log_path, max_len, fmt):
     with lock:
         j = jobs.get(job_id)
@@ -39,12 +48,24 @@ def process_job_thread(job_id, in_path, out_base, log_path, max_len, fmt):
             logf.write(f"Analyzing audio: {in_path}\n")
             logf.flush()
             
-            duration = get_audio_duration(in_path)
+            # Use ensure_wav to convert to 16k mono wav for better processing
+            wav_path = UPLOAD_DIR / f"{job_id}.wav"
+            try:
+                audio_path = ensure_wav(pathlib.Path(in_path), wav_path)
+                if audio_path != pathlib.Path(in_path):
+                    logf.write(f"Converted to WAV: {audio_path.name}\n")
+                    with lock:
+                        j['audio_path'] = str(audio_path)
+            except Exception as e:
+                logf.write(f"Audio conversion failed: {e}\n")
+                audio_path = pathlib.Path(in_path)
+
+            duration = get_audio_duration(str(audio_path))
             if duration > 0:
                 logf.write(f"Duration: {duration:.2f}s\n")
                 logf.write("Searching for silence points...\n")
                 logf.flush()
-                silences = find_silences(in_path)
+                silences = find_silences(str(audio_path))
                 # Split every 10 mins (600s)
                 splits = calculate_splits(duration, silences, 600)
                 logf.write(f"Calculated {len(splits)} segments for processing.\n")
@@ -57,9 +78,9 @@ def process_job_thread(job_id, in_path, out_base, log_path, max_len, fmt):
             if len(splits) > 1:
                 logf.write("Splitting audio at silent points (this may take a moment)...\n")
                 logf.flush()
-                segments = split_audio(in_path, splits, UPLOAD_DIR, job_id)
+                segments = split_audio(str(audio_path), splits, UPLOAD_DIR, job_id)
             else:
-                segments = [(in_path, 0.0)]
+                segments = [(str(audio_path), 0.0)]
                 
             all_txts = []
             all_srts = []
@@ -114,11 +135,16 @@ def process_job_thread(job_id, in_path, out_base, log_path, max_len, fmt):
                     merge_subtitles(all_vtts, f"{out_base}.vtt", is_srt=False)
                 
                 for seg_path, _ in segments:
-                    pathlib.Path(seg_path).unlink(missing_ok=True)
+                    if seg_path != str(audio_path): # Don't delete the main wav yet
+                        pathlib.Path(seg_path).unlink(missing_ok=True)
                 for txt in all_txts: pathlib.Path(txt).unlink(missing_ok=True)
                 for srt, _ in all_srts: pathlib.Path(srt).unlink(missing_ok=True)
                 for vtt, _ in all_vtts: pathlib.Path(vtt).unlink(missing_ok=True)
                 
+            # Cleanup main converted wav if it was created
+            if audio_path != pathlib.Path(in_path):
+                audio_path.unlink(missing_ok=True)
+
             logf.write("\nAll done.\n")
             logf.flush()
             
@@ -134,7 +160,6 @@ def process_job_thread(job_id, in_path, out_base, log_path, max_len, fmt):
             if j['status'] == 'running':
                 j['status'] = 'failed'
                 j['returncode'] = -1
-
 
 @app.route('/')
 def index():
@@ -165,7 +190,6 @@ def upload_chunk():
 def transcribe():
     if not WHISPER.exists() or not MODEL.exists():
         return jsonify({'ok': False, 'error': '尚未安裝模型，先執行: bash scripts/install.sh'}), 400
-
     upload_id = request.form.get('upload_id')
     filename = request.form.get('filename')
     fmt = request.form.get('format', 'txt')
@@ -230,15 +254,15 @@ def job_status(job_id):
 
     # Status is now managed entirely by the background thread.
     txt = ''
-    main_output = j['output_base'] + '.' + j['requested_format']
-    if j['status'] == 'done' and pathlib.Path(main_output).exists():
-        txt = pathlib.Path(main_output).read_text(errors='ignore').strip()
+    main_output = pathlib.Path(j['output_base'] + '.' + j['requested_format'])
+    if j['status'] == 'done' and main_output.exists():
+        txt = main_output.read_text(errors='ignore').strip()
 
     return jsonify({
         'ok': True, 'job_id': job_id, 'status': j['status'],
         'elapsed_sec': round(time.time() - j['start_ts'], 2),
         'returncode': j['returncode'], 'pid': j['pid'],
-        'input_path': j['input_path'], 
+        'input_path': j['input_path'], 'audio_path': j.get('audio_path'),
         'text': txt, 'log_tail': tail_text(j['log_path'], 50),
     })
 
@@ -247,13 +271,13 @@ def job_download(job_id):
     with lock:
         j = jobs.get(job_id)
     if not j or j['status'] != 'done':
-        return "Not found or not ready", 404
-    
+        return 'Not found or not ready', 404
+
     ext = request.args.get('ext', 'txt')
     target = pathlib.Path(j['output_base'] + '.' + ext)
     if not target.exists():
-        return f"Format {ext} not available", 404
-    
+        return f'Format {ext} not available', 404
+
     return send_file(target, as_attachment=True)
 
 @app.post('/api/jobs/<job_id>/cancel')
@@ -274,6 +298,70 @@ def job_cancel(job_id):
                 pass
                 
     return jsonify({'ok': True, 'status': 'cancelled'})
+
+@app.post('/api/llm')
+def llm_process():
+    data = request.get_json(force=True)
+    text = data.get('text', '').strip()
+    action = data.get('action', 'proofread')
+    custom_prompt = data.get('custom_prompt', '').strip()
+    
+    if not text:
+        return jsonify({'ok': False, 'error': '文字內容不可為空'}), 400
+        
+    prompts = {
+        'proofread': "你是一位精通繁體中文的專業會議紀錄秘書。請根據輸入的「原始會議逐字稿內容」，在完全不改變原意的前提下，進行同音錯字修正、補上合適的標點符號、拿掉口吃贅字（例如：呃、然後、這個、那個、也就是說），並整理成通順、易讀的精美段落。請直接輸出整理後的逐字稿，不需說明或回答任何額外文字。",
+        'diarization': "你是一位精通語境邏輯分析的 AI 秘書。請仔細閱讀下面「未區分發言人」的逐字稿內容。請根據對話的上下關係、稱呼、說話口氣、語意轉折與內容邏輯，將逐字稿進行「邏輯分段」，並加上講者標記（如：【講者 A】、【講者 B】等，如果有稱呼，可以直接替換為實際名字，如【張經理】、【小明】）。請直接輸出分段且標記講者後的逐字稿，不要輸出任何解釋或說明。",
+        'minutes': "你是一位高效率的執行秘書。請將以下「會議逐字稿」內容進行整理，產出標準且精美的會議記錄。必須包含以下結構：\n1. 會議核心主題\n2. 重要決議事項 (關鍵點)\n3. 待辦追蹤清單 (Action Items，需指出負責人與任務項目，如果沒有提到負責人，請標記為全體或待定)\n請使用 markdown 格式美化輸出，讓整體結構清晰易讀，不要輸出任何前言或結尾解釋。",
+        'summary': "你是一位專業的商業分析師。請精確地為以下「會議逐字稿」做一份摘要，提煉出最重要的核心關鍵與重點摘要，並以 Bullet points (條列式) 清晰呈現，直接給出最精準的精簡重點即可。",
+    }
+    
+    system_prompt = prompts.get(action, prompts['proofread'])
+    if action == 'custom' and custom_prompt:
+        system_prompt = custom_prompt
+        
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": text}
+    ]
+    
+    payload = {
+        "model": "gemma-4-e2b-it",
+        "messages": messages,
+        "temperature": 0.3,
+        "stream": True
+    }
+    
+    def generate():
+        try:
+            r = requests.post("http://127.0.0.1:18082/v1/chat/completions", json=payload, stream=True, timeout=600)
+            if r.status_code != 200:
+                yield f"data: {json.dumps({'error': 'Llama server returned error: ' + r.text}, ensure_ascii=False)}\n\n"
+                return
+            for line in r.iter_lines():
+                if line:
+                    decoded = line.decode('utf-8').strip()
+                    if decoded.startswith('data:'):
+                        data_str = decoded[5:].strip()
+                        if data_str == '[DONE]':
+                            break
+                        try:
+                            obj = json.loads(data_str)
+                            delta_obj = obj.get('choices', [{}])[0].get('delta', {})
+                            
+                            thought = delta_obj.get('reasoning_content', '')
+                            delta = delta_obj.get('content', '')
+                            
+                            if thought:
+                                yield f"data: {json.dumps({'thought': thought}, ensure_ascii=False)}\n\n"
+                            if delta:
+                                yield f"data: {json.dumps({'delta': delta}, ensure_ascii=False)}\n\n"
+                        except Exception:
+                            continue
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+            
+    return Response(stream_with_context(generate()), mimetype='text/event-stream')
 
 if __name__ == '__main__':
     from waitress import serve
