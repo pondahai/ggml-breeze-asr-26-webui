@@ -373,6 +373,42 @@
         <input id="file" type="file" accept=".wav,.mp3,.m4a,.flac,.ogg" />
       </div>
 
+      <!-- 離線聲紋發言人標記 (WhisperX) 設定區 -->
+      <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 12px; margin-bottom: 8px;">
+        <div style="display: flex; align-items: center; justify-content: space-between;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <input type="checkbox" id="use-whisperx" style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--accent-green);" />
+            <label for="use-whisperx" style="font-size: 14px; font-weight: 600; cursor: pointer; user-select: none;">👥 啟用離線聲紋發言人標記 (WhisperX)</label>
+          </div>
+          <span style="font-size: 11px; background: rgba(25, 195, 125, 0.1); color: var(--accent-green); padding: 2px 6px; border-radius: 4px; border: 1px solid rgba(25, 195, 125, 0.2);">GPU 加速</span>
+        </div>
+        
+        <!-- 模式建議提示 -->
+        <div style="font-size: 12px; color: var(--muted); line-height: 1.5; background: rgba(0, 112, 243, 0.05); padding: 10px 12px; border-radius: 8px; border-left: 3px solid var(--accent-blue);">
+          💡 <strong>如何選擇轉錄模式？</strong><br>
+          • <strong>未勾選 (單人筆記/演講)</strong>：使用台灣優化的 <strong>Breeze ASR</strong>，辨識速度飛快、在地詞彙精準度極高。<br>
+          • <strong>已勾選 (多人會議)</strong>：使用 <strong>WhisperX (Large-v3)</strong> 做聲紋分析，可精準切分不同發言人並整合時間軸。
+        </div>
+        
+        <!-- 當開啟 WhisperX 時展開的詳細設定 -->
+        <div id="whisperx-settings" style="display: none; flex-direction: column; gap: 12px; border-top: 1px dashed var(--border); padding-top: 12px;">
+          <div class="input-group">
+            <label for="hf-token">Hugging Face Access Token (用於下載 pyannote 聲紋切割模型)</label>
+            <input type="password" id="hf-token" placeholder="輸入 hf_... token，會自動加密儲存於瀏覽器" style="width: 100%;" />
+          </div>
+          <div class="row">
+            <div class="input-group" style="flex: 1; min-width: 120px;">
+              <label for="min-speakers">最少發言人數 (選填)</label>
+              <input type="number" id="min-speakers" placeholder="例如：2" min="1" max="20" style="width: 100%;" />
+            </div>
+            <div class="input-group" style="flex: 1; min-width: 120px;">
+              <label for="max-speakers">最多發言人數 (選填)</label>
+              <input type="number" id="max-speakers" placeholder="例如：4" min="1" max="20" style="width: 100%;" />
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="row">
         <div class="input-group" style="flex: 1; min-width: 140px;">
           <label for="format">儲存格式</label>
@@ -428,7 +464,7 @@
         <label>快速整理指令</label>
         <div class="llm-grid">
           <button class="llm-btn" id="btn-proofread" onclick="processLLM('proofread')">✍️ 校正字句 & 標點</button>
-          <button class="llm-btn" id="btn-diarization" onclick="processLLM('diarization')">👥 語境發言人區分</button>
+          <button class="llm-btn" id="btn-diarization" onclick="processLLM('diarization')">👥 智慧發言人姓名重寫</button>
           <button class="llm-btn" id="btn-minutes" onclick="processLLM('minutes')">📝 產出精美會議記錄</button>
           <button class="llm-btn" id="btn-summary" onclick="processLLM('summary')">💡 提煉精簡重點摘要</button>
         </div>
@@ -494,8 +530,28 @@
     const llmOutputRaw = document.getElementById('llm-output-raw');
     const viewModeBtn = document.getElementById('view-mode-btn');
 
+    // WhisperX Elements
+    const useWhisperxEl = document.getElementById('use-whisperx');
+    const whisperxSettingsEl = document.getElementById('whisperx-settings');
+    const hfTokenEl = document.getElementById('hf-token');
+    const minSpeakersEl = document.getElementById('min-speakers');
+    const maxSpeakersEl = document.getElementById('max-speakers');
+
     let jobId=null, timer=null;
     let isRichMode = true;
+
+    // WhisperX UI Toggle
+    useWhisperxEl.addEventListener('change', (e) => {
+      whisperxSettingsEl.style.display = e.target.checked ? 'flex' : 'none';
+    });
+
+    // HF Token storage
+    if (localStorage.getItem('hf_token')) {
+      hfTokenEl.value = localStorage.getItem('hf_token');
+    }
+    hfTokenEl.addEventListener('input', (e) => {
+      localStorage.setItem('hf_token', e.target.value.trim());
+    });
 
     // File selection UI update
     fileEl.addEventListener('change', (e) => {
@@ -576,6 +632,12 @@ btnGo.onclick=async()=>{
   fd2.append('filename', f.name);
   fd2.append('format', fmt);
   fd2.append('max_len', maxLen);
+  fd2.append('use_whisperx', useWhisperxEl.checked ? 'true' : 'false');
+  if (useWhisperxEl.checked) {
+    fd2.append('hf_token', hfTokenEl.value.trim());
+    fd2.append('min_speakers', minSpeakersEl.value.trim());
+    fd2.append('max_speakers', maxSpeakersEl.value.trim());
+  }
 
   try {
     const r=await fetch('/api/transcribe',{method:'POST',body:fd2});
@@ -587,6 +649,7 @@ btnGo.onclick=async()=>{
       return; 
     }
     jobId=j.job_id;
+    localStorage.setItem('current_job_id', jobId);
     statusEl.textContent=`音檔上傳完成！開始分析與切片... (job_id=${jobId})`;
     await poll();
     timer=setInterval(poll, 2000);
@@ -600,11 +663,19 @@ btnGo.onclick=async()=>{
     async function poll(){
       if(!jobId) return;
       const r=await fetch(`/api/jobs/${jobId}`);
+      if (r.status === 404) {
+        statusEl.textContent = '狀態: 任務不存在或伺服器已重啟 ❌';
+        statusEl.style.color = '#ef4444';
+        localStorage.removeItem('current_job_id');
+        clearInterval(timer); timer = null; setBusy(false);
+        return;
+      }
       const j=await r.json();
       if(!j.ok){ statusEl.textContent='狀態: 查詢失敗'; return; }
       statusEl.textContent = `狀態: ${j.status.toUpperCase()} (已耗時 ${j.elapsed_sec} 秒) - 處理PID: ${j.pid||'-'}`;
       pathsEl.textContent = `轉錄檔案: ${j.input_path||''}`;
       logEl.textContent = j.log_tail || '';
+      logEl.scrollTop = logEl.scrollHeight;
       
       if(j.status==='done'){
         textEl.value = j.text || '';
@@ -619,10 +690,12 @@ btnGo.onclick=async()=>{
           link.style.display = 'inline';
           link.textContent = `${ext.toUpperCase()} 下載`;
         });
+        localStorage.removeItem('current_job_id');
         clearInterval(timer); timer=null; setBusy(false);
       } else if(['failed','cancelled'].includes(j.status)){
         statusEl.textContent = `狀態: ${j.status==='cancelled'?'已取消':'轉錄失敗 ❌'}`;
         statusEl.style.color = '#ef4444';
+        localStorage.removeItem('current_job_id');
         clearInterval(timer); timer=null; setBusy(false);
       }
     }
@@ -772,24 +845,35 @@ btnGo.onclick=async()=>{
       const llmDot = document.getElementById('llm-dot');
       const llmStatus = document.getElementById('llm-status');
       try {
-        const r = await fetch('http://192.168.0.124:18082/health');
+        const r = await fetch('/api/llm/health');
         const j = await r.json();
-        if (j.status === 'ok') {
+        if (j.ok && j.status === 'online') {
           llmDot.className = 'dot';
           llmStatus.textContent = 'Gemma-4: 18082 (Online)';
         } else {
           llmDot.className = 'dot yellow';
-          llmStatus.textContent = 'Gemma-4: 18082 (Loading Model)';
+          llmStatus.textContent = 'Gemma-4: 18082 (Offline)';
         }
       } catch(e) {
         llmDot.className = 'dot yellow';
-        llmStatus.textContent = 'Gemma-4: 18082 (Offline/Connecting)';
+        llmStatus.textContent = 'Gemma-4: 18082 (Error)';
       }
     }
 
     checkLLMHealth();
     // Periodically check LLM status
     setInterval(checkLLMHealth, 10000);
+
+    // 頁面載入時自動恢復先前未完成的轉寫任務
+    const savedJobId = localStorage.getItem('current_job_id');
+    if (savedJobId) {
+      jobId = savedJobId;
+      setBusy(true);
+      statusCard.style.display = 'block';
+      statusEl.textContent = `狀態: 偵測到未完成背景任務，正在自動恢復進度... (ID: ${jobId})`;
+      poll();
+      timer = setInterval(poll, 2000);
+    }
   </script>
 </body>
 </html>

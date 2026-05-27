@@ -39,6 +39,125 @@ def ensure_wav(in_path: pathlib.Path, wav_path: pathlib.Path):
         raise RuntimeError('ffmpeg convert failed: ' + (p.stderr or p.stdout)[-500:])
     return wav_path
 
+def run_whisperx_job(job_id, in_path, out_base, log_path, language, min_speakers, max_speakers, hf_token):
+    with lock:
+        j = jobs.get(job_id)
+        
+    try:
+        with open(log_path, 'a', encoding='utf-8') as logf:
+            logf.write("=== 離線 WhisperX 聲紋發言人標記服務開始 ===\n")
+            logf.write(f"音訊路徑: {in_path}\n")
+            logf.flush()
+            
+            wav_path = UPLOAD_DIR / f"{job_id}.wav"
+            try:
+                audio_path = ensure_wav(pathlib.Path(in_path), wav_path)
+                if audio_path != pathlib.Path(in_path):
+                    logf.write(f"Converted to WAV: {audio_path.name}\n")
+                    with lock:
+                        j['audio_path'] = str(audio_path)
+            except Exception as e:
+                logf.write(f"Audio conversion failed: {e}\n")
+                audio_path = pathlib.Path(in_path)
+
+            logf.write("正在傳送請求給離線聲紋微服務 (Port 8088)...(預估耗時較長，請耐心等候)\n")
+            logf.flush()
+            
+            payload = {
+                'file_path': str(audio_path),
+                'language': language,
+                'log_path': str(log_path),
+            }
+            if min_speakers is not None: payload['min_speakers'] = min_speakers
+            if max_speakers is not None: payload['max_speakers'] = max_speakers
+            if hf_token: payload['hf_token'] = hf_token
+            
+            r = requests.post("http://127.0.0.1:8088/api/diarize", data=payload, timeout=1800)
+            if r.status_code != 200:
+                raise RuntimeError(f"FastAPI 服務回傳錯誤 ({r.status_code}): {r.text}")
+                
+            res = r.json()
+            logf.write("轉錄與聲紋分割完成！開始格式化輸出...\n")
+            logf.flush()
+            
+            segments = res.get('segments', [])
+            
+            # 1. TXT
+            txt_path = pathlib.Path(f"{out_base}.txt")
+            txt_lines = []
+            for seg in segments:
+                spk = seg.get('speaker', '未知講者')
+                spk_label = spk.replace("SPEAKER_", "講者 ")
+                txt_lines.append(f"【{spk_label}】 {seg.get('text', '').strip()}")
+            txt_path.write_text("\n".join(txt_lines), encoding='utf-8')
+            
+            # 2. SRT
+            srt_path = pathlib.Path(f"{out_base}.srt")
+            srt_lines = []
+            for idx, seg in enumerate(segments, 1):
+                start_s = seg.get('start', 0.0)
+                end_s = seg.get('end', 0.0)
+                
+                def format_srt_time(s):
+                    hrs = int(s // 3600)
+                    mins = int((s % 3600) // 60)
+                    secs = int(s % 60)
+                    ms = int(round((s % 1) * 1000))
+                    return f"{hrs:02d}:{mins:02d}:{secs:02d},{ms:03d}"
+                
+                spk = seg.get('speaker', '未知講者')
+                spk_label = spk.replace("SPEAKER_", "講者 ")
+                
+                srt_lines.append(str(idx))
+                srt_lines.append(f"{format_srt_time(start_s)} --> {format_srt_time(end_s)}")
+                srt_lines.append(f"【{spk_label}】{seg.get('text', '').strip()}")
+                srt_lines.append("")
+            srt_path.write_text("\n".join(srt_lines), encoding='utf-8')
+
+            # 3. VTT
+            vtt_path = pathlib.Path(f"{out_base}.vtt")
+            vtt_lines = ["WEBVTT", ""]
+            for idx, seg in enumerate(segments, 1):
+                start_s = seg.get('start', 0.0)
+                end_s = seg.get('end', 0.0)
+                
+                def format_vtt_time(s):
+                    hrs = int(s // 3600)
+                    mins = int((s % 3600) // 60)
+                    secs = int(s % 60)
+                    ms = int(round((s % 1) * 1000))
+                    return f"{hrs:02d}:{mins:02d}:{secs:02d}.{ms:03d}"
+                
+                spk = seg.get('speaker', '未知講者')
+                spk_label = spk.replace("SPEAKER_", "講者 ")
+                
+                vtt_lines.append(f"{format_vtt_time(start_s)} --> {format_vtt_time(end_s)}")
+                vtt_lines.append(f"【{spk_label}】{seg.get('text', '').strip()}")
+                vtt_lines.append("")
+            vtt_path.write_text("\n".join(vtt_lines), encoding='utf-8')
+            
+            # Cleanup main converted wav if it was created
+            if audio_path != pathlib.Path(in_path):
+                audio_path.unlink(missing_ok=True)
+            
+            logf.write("=== 所有輸出檔案寫入完成，任務結束！ ===\n")
+            logf.flush()
+            with lock:
+                if j['status'] == 'running':
+                    j['status'] = 'done'
+                    j['returncode'] = 0
+                    
+    except Exception as e:
+        with open(log_path, 'a', encoding='utf-8') as logf:
+            logf.write(f"\n[錯誤] 聲紋處理失敗: {e}\n")
+            import traceback
+            traceback.print_exc(file=logf)
+            logf.flush()
+        with lock:
+            if j['status'] == 'running':
+                j['status'] = 'failed'
+                j['returncode'] = 1
+
 def process_job_thread(job_id, in_path, out_base, log_path, max_len, fmt):
     with lock:
         j = jobs.get(job_id)
@@ -188,8 +307,17 @@ def upload_chunk():
 
 @app.post('/api/transcribe')
 def transcribe():
-    if not WHISPER.exists() or not MODEL.exists():
+    use_whisperx = request.form.get('use_whisperx', 'false') == 'true'
+    hf_token = request.form.get('hf_token', '').strip() or None
+    
+    min_speakers = request.form.get('min_speakers', '').strip()
+    max_speakers = request.form.get('max_speakers', '').strip()
+    min_speakers = int(min_speakers) if min_speakers and min_speakers.isdigit() else None
+    max_speakers = int(max_speakers) if max_speakers and max_speakers.isdigit() else None
+
+    if not use_whisperx and (not WHISPER.exists() or not MODEL.exists()):
         return jsonify({'ok': False, 'error': '尚未安裝模型，先執行: bash scripts/install.sh'}), 400
+
     upload_id = request.form.get('upload_id')
     filename = request.form.get('filename')
     fmt = request.form.get('format', 'txt')
@@ -237,10 +365,18 @@ def transcribe():
         jobs[job_id] = {
             'id': job_id, 'status': 'running', 'start_ts': time.time(), 'pid': None,
             'proc': None, 'input_path': str(in_path), 'output_base': str(out_base),
-            'log_path': str(log_path), 'returncode': None, 'requested_format': fmt
+            'log_path': str(log_path), 'returncode': None, 'requested_format': fmt,
+            'type': 'whisperx' if use_whisperx else 'whisper-cli'
         }
         
-    t = threading.Thread(target=process_job_thread, args=(job_id, in_path, out_base, log_path, max_len, fmt))
+    if use_whisperx:
+        t = threading.Thread(
+            target=run_whisperx_job,
+            args=(job_id, in_path, out_base, log_path, 'zh', min_speakers, max_speakers, hf_token)
+        )
+    else:
+        t = threading.Thread(target=process_job_thread, args=(job_id, in_path, out_base, log_path, max_len, fmt))
+    
     t.start()
 
     return jsonify({'ok': True, 'job_id': job_id, 'status': 'running'})
@@ -311,7 +447,7 @@ def llm_process():
         
     prompts = {
         'proofread': "你是一位精通繁體中文的專業會議紀錄秘書。請根據輸入的「原始會議逐字稿內容」，在完全不改變原意的前提下，進行同音錯字修正、補上合適的標點符號、拿掉口吃贅字（例如：呃、然後、這個、那個、也就是說），並整理成通順、易讀的精美段落。請直接輸出整理後的逐字稿，不需說明或回答任何額外文字。",
-        'diarization': "你是一位精通語境邏輯分析的 AI 秘書。請仔細閱讀下面「未區分發言人」的逐字稿內容。請根據對話的上下關係、稱呼、說話口氣、語意轉折與內容邏輯，將逐字稿進行「邏輯分段」，並加上講者標記（如：【講者 A】、【講者 B】等，如果有稱呼，可以直接替換為實際名字，如【張經理】、【小明】）。請直接輸出分段且標記講者後的逐字稿，不要輸出任何解釋或說明。",
+        'diarization': "你是一位精通語境邏輯分析的 AI 秘書。請仔細閱讀下面包含 `【講者 XX】` 聲紋標籤的會議逐字稿內容。請根據對話的上下關係、互相稱呼、對話語境與語意邏輯，推斷出每一位講者的真實姓名或職稱（例如：李總、張經理、小明），並將文中的 `【講者 XX】` 統一替換為對應的真實姓名標籤（例如 `【李總】`、`【小明】`）。如果某個講者無法從語境中推斷出名字，請保留原本的 `【講者 XX】` 或給予合理的臨時角色標籤（如 `【主持人】`、`【女士】`）。請直接輸出替換名字後的完整分段逐字稿，不要輸出任何前言、後記或額外解釋。",
         'minutes': "你是一位高效率的執行秘書。請將以下「會議逐字稿」內容進行整理，產出標準且精美的會議記錄。必須包含以下結構：\n1. 會議核心主題\n2. 重要決議事項 (關鍵點)\n3. 待辦追蹤清單 (Action Items，需指出負責人與任務項目，如果沒有提到負責人，請標記為全體或待定)\n請使用 markdown 格式美化輸出，讓整體結構清晰易讀，不要輸出任何前言或結尾解釋。",
         'summary': "你是一位專業的商業分析師。請精確地為以下「會議逐字稿」做一份摘要，提煉出最重要的核心關鍵與重點摘要，並以 Bullet points (條列式) 清晰呈現，直接給出最精準的精簡重點即可。",
     }
@@ -362,6 +498,16 @@ def llm_process():
             yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
             
     return Response(stream_with_context(generate()), mimetype='text/event-stream')
+
+@app.route('/api/llm/health')
+def llm_health():
+    try:
+        r = requests.get("http://127.0.0.1:18082/v1/models", timeout=3)
+        if r.status_code == 200:
+            return jsonify({'ok': True, 'status': 'online', 'model': 'gemma-4'})
+    except Exception as e:
+        pass
+    return jsonify({'ok': False, 'status': 'offline'})
 
 if __name__ == '__main__':
     from waitress import serve
