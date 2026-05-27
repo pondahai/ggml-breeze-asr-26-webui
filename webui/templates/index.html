@@ -860,7 +860,53 @@ btnGo.onclick=async()=>{
       }
     }
 
-    checkLLMHealth();
+    async function fetchSystemCapabilities() {
+      try {
+        const r = await fetch('/api/system/capabilities');
+        const caps = await r.json();
+        applyCapabilities(caps);
+      } catch (e) {
+        console.error("Failed to fetch capabilities:", e);
+      }
+    }
+
+    function applyCapabilities(caps) {
+      if (!caps || !caps.capabilities) return;
+      
+      if (caps.capabilities.whisperx_diarization === false) {
+        const useWhisperxEl = document.getElementById('use-whisperx');
+        if (useWhisperxEl) {
+          useWhisperxEl.disabled = true;
+          useWhisperxEl.checked = false;
+          useWhisperxEl.title = "硬體不支援或尚未安裝 WhisperX (建議 VRAM >= 7GB)";
+          
+          const label = document.querySelector('label[for="use-whisperx"]');
+          if (label) {
+            label.style.color = "var(--muted)";
+            label.title = "硬體不支援或尚未安裝 WhisperX (建議 VRAM >= 7GB)";
+          }
+          
+          const whisperxSettingsEl = document.getElementById('whisperx-settings');
+          if (whisperxSettingsEl) whisperxSettingsEl.style.display = 'none';
+        }
+      }
+      
+      if (caps.capabilities.gemma_e2b_multimodal === false) {
+        const btnRewrite = document.getElementById('btn-diarization');
+        if (btnRewrite) {
+          btnRewrite.disabled = true;
+          btnRewrite.style.opacity = '0.5';
+          btnRewrite.style.cursor = 'not-allowed';
+          btnRewrite.title = "硬體不支援或尚未安裝 Gemma-4-E2B 多模態模型";
+        }
+      }
+    }
+
+    window.addEventListener('load', () => {
+      fetchSystemCapabilities();
+      checkLLMHealth();
+    });
+
     // Periodically check LLM status
     setInterval(checkLLMHealth, 10000);
 

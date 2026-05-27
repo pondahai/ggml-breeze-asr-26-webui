@@ -15,6 +15,8 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 RESULT_DIR.mkdir(exist_ok=True)
 LOG_DIR.mkdir(exist_ok=True)
 
+CAPABILITIES_FILE = PROJECT_ROOT / "system_capabilities.json"
+
 WHISPER = PROJECT_ROOT / 'third_party' / 'whisper.cpp' / 'build' / 'bin' / 'whisper-cli'
 MODEL = PROJECT_ROOT / 'third_party' / 'whisper.cpp' / 'models' / 'ggml-breeze-asr-26.bin'
 ALLOWED = {'.wav', '.mp3', '.m4a', '.flac', '.ogg'}
@@ -279,6 +281,22 @@ def process_job_thread(job_id, in_path, out_base, log_path, max_len, fmt):
             if j['status'] == 'running':
                 j['status'] = 'failed'
                 j['returncode'] = -1
+
+@app.route('/api/system/capabilities')
+def get_system_capabilities():
+    default_caps = {
+        "capabilities": {
+            "whisperx_diarization": True,
+            "gemma_e2b_multimodal": True
+        }
+    }
+    if CAPABILITIES_FILE.exists():
+        try:
+            caps = json.loads(CAPABILITIES_FILE.read_text(encoding='utf-8'))
+            return jsonify(caps)
+        except Exception:
+            return jsonify(default_caps)
+    return jsonify(default_caps)
 
 @app.route('/')
 def index():
