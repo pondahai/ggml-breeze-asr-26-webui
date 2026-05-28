@@ -529,7 +529,7 @@ def llm_health():
 
 if __name__ == '__main__':
     from waitress import serve
-    port = int(os.environ.get('PORT', '8013'))
+    port = int(os.environ.get('WEBUI_PORT', '8013'))
     print(f"Starting server with Waitress on 0.0.0.0:{port}")
     # Increase max_request_body_size to 10MB to accommodate 1MB chunks + multipart headers
     serve(app, host='0.0.0.0', port=port, threads=8, max_request_body_size=1073741824)
