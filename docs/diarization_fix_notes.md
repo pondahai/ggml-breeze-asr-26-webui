@@ -51,10 +51,38 @@ May 28 09:40:36 ubuntu kernel: Out of memory: Killed process 1089662 (python3) .
 
 ---
 
-## 4. Git 歷史紀錄
-*   **修復時間：** 2026-05-28 09:51 (Local Time)
+## 4. 未來展望：Gemma-4-E2B 原生多模態語音輸入與 llama-cpp 評估
+
+### 💡 核心技術特點
+Google 釋出的 Gemma 4 家族中，具備**原生語音/音訊輸入能力 (Native Audio Input)** 的僅限於針對邊緣運算優化 (Edge-optimized) 的輕量化變體：
+1. **Gemma 4 E2B** (Effective 2B) — 本專案目前所使用的版本。
+2. **Gemma 4 E4B** (Effective 4B)。
+*(註：較大尺寸的 Gemma 4 26B MoE 與 31B Dense 等模型並不具備原生語音編碼器能力。)*
+
+### ⚙️ `llama.cpp` 整合機制與當前痛點
+要在 `llama.cpp` (如 `llama-server`) 中啟用 Gemma 4 的原生語音處理，架構與運行機制有以下要求與限制：
+1. **多模態投影檔 (mmproj)：**
+   - 除了加載主模型的 GGUF 檔案外，啟動 `llama-server` 時必須額外加上 `--mmproj <path>` 參數，加載對應的音訊多模態投影權重檔，用以初始化音訊編碼器 (Audio Encoder)。
+2. **多模態推論流程：**
+   - 與傳統 Standalone ASR (如 Whisper) 不同，Gemma 4 E2B 是將音訊直接編碼為 Embeddings 傳遞給 LLM 進行語意推理、總結或多輪對話，而不是先轉成文字再丟給 LLM。
+3. **現存之穩定性瓶頸（暫緩導入原因）：**
+   - **API 路由不穩定：** 目前 `llama-server` 對於音訊內容類型 (Audio Content-Type) 的 API 分發與請求路由邏輯仍高度處於實驗階段 (Experimental)。若直接以音訊 API 請求，時常會因底層多模態張量維度不對稱或 C++ 端點邏輯未完全成熟而觸發內部 `HTTP 500` 或服務崩潰。
+   - **記憶體開銷激增：** 當載入 `mmproj` 語音編碼器時，會進一步吃緊 Jetson Xavier 寶貴的 Unified Memory。在目前 Port 18082 常駐文字推理、Port 8012 / 8088 處理 ASR 的情況下，容易再次逼近 OOM 邊緣。
+
+### 🔮 未來整合方向
+雖然 Gemma-4-E2B 原生語音輸入令人期待，但基於系統穩定性與資源限制，目前最保險且高精度的方案依然是我們目前的**雙引擎解耦架構**：
+> `音訊輸入` ➡️ `Silero VAD / Faster Whisper / WhisperX (CPU/GPU 分流處理 ASR/聲紋)` ➡️ `Gemma-4-E2B 文字推理`
+
+**後續追蹤計畫：**
+1. **上游更新觀望：** 持續關注 `llama.cpp` 社群對於 Gemma 4 多模態音訊 `--mmproj` 的上游 PR 更新，特別是 `llama-server` 接收 `input_audio` 端點的穩定性修復。
+2. **多模態資源測試：** 待未來版本穩定後，在非生產環境嘗試加載 `gemma-4-e2b-it-Q8_0.gguf` 與其音訊 `mmproj`，並測試在高 Swap 頁面交換下 Xavier 的記憶體與推論延遲表現。
+
+---
+
+## 5. Git 歷史紀錄
+*   **修復時間：** 2026-05-28 10:48 (Local Time 更新)
 *   **修改檔案：**
     *   `/media/nvidia/sd/whisperx-service/worker.py` (強制聲紋分割降級至 CPU 運行，解決 -9 OOM 崩潰)
     *   `scripts/probe_env.sh` (修復 CUDA nvcc 探測路徑)
     *   `README.md` (新增常見排錯與維護指南，加入 OOM 處理說明)
-    *   `docs/diarization_fix_notes.md` (新建本篇修正筆記)
+    *   `docs/diarization_fix_notes.md` (本篇修正筆記，新增 Gemma-4 多模態語音評估)
