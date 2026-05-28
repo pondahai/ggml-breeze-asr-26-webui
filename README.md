@@ -47,7 +47,7 @@ bash scripts/install.sh
 bash scripts/start-all.sh
 ```
 
-接著打開瀏覽器前往：`http://<您的IP>:8012`
+接著打開瀏覽器前往：`http://<您的IP>:8013`
 
 ### 網頁介面操作指南
 - **引擎切換：** 在上傳區塊可以勾選是否啟用 **WhisperX 講者分離**。
