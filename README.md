@@ -47,7 +47,7 @@ bash scripts/install.sh
 bash scripts/start-all.sh
 ```
 
-接著打開瀏覽器前往：`http://<您的IP>:8013`
+接著打開瀏覽器前往：`http://<您的IP>:8012`
 
 ### 網頁介面操作指南
 - **引擎切換：** 在上傳區塊可以勾選是否啟用 **WhisperX 講者分離**。
@@ -68,3 +68,15 @@ bash scripts/start-all.sh
 1. `probe_env.sh` 報告將顯示該功能為 `false`。
 2. 網頁介面上對應的按鈕（如 WhisperX 切換開關）會自動反灰。
 3. 預設降級為最輕量的 **Breeze ASR (CPU 模式)** 來確保最基本的語音轉文字功能依然可用。
+
+---
+
+## 🔧 邊緣設備常見排錯 (Edge Device Troubleshooting)
+
+### 1. Jetson 設備 CUDA 未偵測到 (網頁功能反灰)
+*   **原因：** Jetson 設備的 `nvcc` 位於 `/usr/local/cuda/bin/nvcc`，在 SSH 非互動式環境中可能未加入 `PATH`。
+*   **修正：** 腳本 `probe_env.sh` 已完成升級，會自動將 `/usr/local/cuda/bin` 加入環境變數，現在能完美適配所有 Jetson 邊緣設備。您只需重新執行 `bash scripts/probe_env.sh` 並刷新網頁即可。
+
+### 2. 聲紋標記 API 拋出 500 錯誤 (Internal Server Error)
+*   **原因：** 背景長期運行（數天以上）的 WhisperX 服務 (Port 8088) 在調用 `subprocess` 載入 PyTorch/Pyannote 進行發言人對齊時，可能因父進程記憶體分配鎖定或碎裂，導致系統 `fork()` 時回傳 `ENOMEM` (Cannot allocate memory) 錯誤。
+*   **解決方法：** 請 SSH 登入 Jetson Xavier，使用 `kill -9 <PID>` 關閉 Port 8088 的舊進程，並重新跑一遍啟動服務指令以重置乾淨的運行記憶體空間。

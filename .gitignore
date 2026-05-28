@@ -32,3 +32,11 @@ webui/uploads/
 .vscode/
 .idea/
 .DS_Store
+
+# Auto-generated hardware capabilities
+system_capabilities.json
+
+# Backups
+*.bak
+*.bak2
+*.xavier_backup

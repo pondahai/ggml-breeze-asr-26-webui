@@ -27,9 +27,14 @@ TOTAL_MEM_GB=$((TOTAL_MEM_KB / 1024 / 1024))
 echo "🧠 系統記憶體: ~${TOTAL_MEM_GB} GB"
 
 # 3. GPU & CUDA Detection
+export PATH=$PATH:/usr/local/cuda/bin
 if command -v nvcc &> /dev/null; then
     HAS_CUDA=true
     CUDA_VER=$(nvcc --version | grep "release" | awk '{print $5}' | cut -d ',' -f 1)
+    echo "🟩 CUDA 工具鍊: 支援 (版本: $CUDA_VER)"
+elif [ -x /usr/local/cuda/bin/nvcc ]; then
+    HAS_CUDA=true
+    CUDA_VER=$(/usr/local/cuda/bin/nvcc --version | grep "release" | awk '{print $5}' | cut -d ',' -f 1)
     echo "🟩 CUDA 工具鍊: 支援 (版本: $CUDA_VER)"
 else
     echo "🟨 CUDA 工具鍊: 未安裝 (可能只能使用 CPU 運算)"
