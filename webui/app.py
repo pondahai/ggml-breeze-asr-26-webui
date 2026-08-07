@@ -62,6 +62,16 @@ def available_models():
 MODEL = model_path()
 ALLOWED = {'.wav', '.mp3', '.m4a', '.flac', '.ogg'}
 
+# Default LLM endpoint. Only a starting point -- the browser sends the address
+# it wants per request, since which LLM to use is a user preference rather than
+# a property of this machine. .env's GEMMA_LLM_API_URL was previously ignored
+# entirely; the address was hardcoded in two places.
+LLM_API_URL = (os.environ.get('GEMMA_LLM_API_URL') or 'http://127.0.0.1:18082').rstrip('/')
+LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', '')
+# Fallback key for a browser that sends none. Local llama.cpp/vLLM usually need
+# no auth at all, which is why this is optional everywhere.
+LLM_API_KEY = os.environ.get('LLM_API_KEY', '')
+
 app = Flask(__name__)
 jobs = {}
 lock = threading.Lock()
@@ -518,13 +528,94 @@ def job_cancel(job_id):
                 
     return jsonify({'ok': True, 'status': 'cancelled'})
 
+def resolve_llm_url(requested=''):
+    """Which LLM server to talk to. The caller's choice wins over .env."""
+    requested = (requested or '').strip().rstrip('/')
+    if not requested:
+        return LLM_API_URL
+    # The browser hands this to us and we then fetch it, so refuse anything
+    # that is not plain http(s).
+    if not requested.startswith(('http://', 'https://')):
+        raise ValueError('API 位址必須以 http:// 或 https:// 開頭')
+    return requested
+
+
+def llm_auth_headers(api_key=''):
+    """Bearer header for endpoints that want one. Empty key -> no header."""
+    api_key = (api_key or '').strip() or LLM_API_KEY
+    return {'Authorization': f'Bearer {api_key}'} if api_key else {}
+
+
+def llm_server_models(api_url=None, api_key=''):
+    """Ask an LLM server what it serves. [] when unreachable."""
+    url = api_url or LLM_API_URL
+    try:
+        r = requests.get(f"{url}/v1/models", timeout=5, headers=llm_auth_headers(api_key))
+        if r.status_code == 200:
+            return [m.get('id') for m in r.json().get('data', []) if m.get('id')]
+    except Exception:
+        pass
+    return []
+
+
+def resolve_llm_model(requested='', api_url=None, served=None):
+    """Explicit > configured > whatever is served.
+
+    A model remembered from a previous session may not exist on the server the
+    browser is now pointed at, so honour it only if still listed.
+    """
+    requested = (requested or '').strip()
+    if served is None:
+        served = llm_server_models(api_url)
+    if requested and (not served or requested in served):
+        return requested
+    if LLM_MODEL_NAME and (not served or LLM_MODEL_NAME in served):
+        return LLM_MODEL_NAME
+    return served[0] if served else ''
+
+
+@app.post('/api/llm/models')
+def llm_models():
+    """Models a given LLM server offers.
+
+    POST rather than GET because the request may carry an API key, and a key in
+    a query string ends up in access logs, proxy logs and browser history. The
+    key is never echoed back in the response.
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        url = resolve_llm_url(data.get('api_url', ''))
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc), 'models': []}), 400
+
+    api_key = data.get('api_key', '')
+    served = llm_server_models(url, api_key)
+    wanted = (data.get('model', '') or '').strip()
+    return jsonify({
+        'ok': bool(served),
+        'models': served,
+        'default': resolve_llm_model(wanted, url, served),
+        'fallback': bool(wanted and served and wanted not in served),
+        'api_url': url,
+        'default_api_url': LLM_API_URL,
+    })
+
+
 @app.post('/api/llm')
 def llm_process():
     data = request.get_json(force=True)
     text = data.get('text', '').strip()
     action = data.get('action', 'proofread')
     custom_prompt = data.get('custom_prompt', '').strip()
-    
+
+    try:
+        api_url = resolve_llm_url(data.get('api_url', ''))
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    api_key = data.get('api_key', '')
+    model = resolve_llm_model(data.get('model', ''), api_url,
+                              llm_server_models(api_url, api_key))
+
     if not text:
         return jsonify({'ok': False, 'error': '文字內容不可為空'}), 400
         
@@ -544,8 +635,13 @@ def llm_process():
         {"role": "user", "content": text}
     ]
     
+    if not model:
+        return jsonify({'ok': False, 'error':
+                        f'LLM 伺服器沒有回報任何模型（{api_url}）。'
+                        '請確認位址正確、服務已啟動，若需要金鑰請填入。'}), 503
+
     payload = {
-        "model": "gemma-4-e2b-it",
+        "model": model,
         "messages": messages,
         "temperature": 0.3,
         "stream": True
@@ -553,9 +649,10 @@ def llm_process():
     
     def generate():
         try:
-            r = requests.post("http://127.0.0.1:18082/v1/chat/completions", json=payload, stream=True, timeout=600)
+            r = requests.post(f"{api_url}/v1/chat/completions", json=payload, stream=True,
+                              timeout=600, headers=llm_auth_headers(api_key))
             if r.status_code != 200:
-                yield f"data: {json.dumps({'error': 'Llama server returned error: ' + r.text}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'error': f'LLM 伺服器回應 {r.status_code}: ' + r.text[:300]}, ensure_ascii=False)}\n\n"
                 return
             for line in r.iter_lines():
                 if line:
@@ -584,13 +681,15 @@ def llm_process():
 
 @app.route('/api/llm/health')
 def llm_health():
-    try:
-        r = requests.get("http://127.0.0.1:18082/v1/models", timeout=3)
-        if r.status_code == 200:
-            return jsonify({'ok': True, 'status': 'online', 'model': 'gemma-4'})
-    except Exception as e:
-        pass
-    return jsonify({'ok': False, 'status': 'offline'})
+    """Liveness of the default endpoint. The panel uses /api/llm/models for the
+    address the user actually picked; this stays GET for existing callers."""
+    served = llm_server_models()
+    if served:
+        # Used to report "gemma-4" no matter what was actually running.
+        return jsonify({'ok': True, 'status': 'online', 'api_url': LLM_API_URL,
+                        'model': resolve_llm_model('', LLM_API_URL, served),
+                        'models': served})
+    return jsonify({'ok': False, 'status': 'offline', 'api_url': LLM_API_URL})
 
 if __name__ == '__main__':
     from waitress import serve
