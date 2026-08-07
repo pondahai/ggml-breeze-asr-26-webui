@@ -35,8 +35,36 @@ cd ggml-breeze-asr-26-webui
 # 2. 執行硬體探測 (重要！)
 bash scripts/probe_env.sh
 
-# 3. 執行安裝
+# 3. 執行安裝 (會自動取得並編譯 whisper.cpp)
 bash scripts/install.sh
+```
+
+`install.sh` 會 clone `whisper.cpp` 到 `third_party/`(該目錄在 `.gitignore` 裡，
+所以全新 clone 不會有)、用 CMake 依探測結果編譯，並把 Python 相依裝進專案的
+`.venv`。
+
+## 🎙️ 語音模型
+
+本專案**不含**轉檔工具，模型請用
+[breeze-asr-hub](https://github.com/pondahai/breeze-asr-hub) 產生：
+
+```bash
+scripts/fetch_model.sh --convert --variant 26   # 台語，輸出中文字
+scripts/fetch_model.sh --convert --variant 25   # 台灣華語、中英夾雜
+```
+
+把產生的 `.bin` 放進 `third_party/whisper.cpp/models/`(或設 `MODEL_DIR`)。
+兩顆可以並存 —— **只要有兩顆以上，網頁上就會自動出現模型下拉選單**，
+每次轉錄可以分別指定。預設是 `26`,用 `MODEL_VARIANT` 可改。
+
+實測補充:在一段**華語**會議錄音上，`26` 開頭生成了幻覺字幕並整段漏掉主席致詞，
+`25` 則正確轉出。音檔以華語為主的話建議把預設設成 `25`。
+
+命令列也可以指定:
+
+```bash
+bash scripts/transcribe.sh -m 25 /path/to/audio.wav
+curl localhost:8013/api/models                    # 有哪幾顆可用
 ```
 
 ## 🚀 服務啟動
@@ -51,6 +79,7 @@ bash scripts/start-all.sh
 
 ### 網頁介面操作指南
 - **引擎切換：** 在上傳區塊可以勾選是否啟用 **WhisperX 講者分離**。
+- **模型切換：** 轉好兩顆以上模型時會出現「辨識模型」選單，可逐次選擇 Breeze ASR 25 / 26。只有一顆時選單會隱藏。
 - **超大檔案支援：** 系統已實作 Chunked Upload，數百 MB 的音訊檔也能穩定上傳並進行 Smart Audio Splitting。
 - **重新整理不中斷：** 結合 LocalStorage 機制，上傳處理中即使重新整理網頁，進度條也能無縫接軌。
 - **AI 秘書：** 若 Gemma-4 伺服器啟動成功，右上角會亮綠燈，您可以直接點擊「智慧發言人姓名重寫」等功能。
