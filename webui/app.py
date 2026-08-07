@@ -17,8 +17,49 @@ LOG_DIR.mkdir(exist_ok=True)
 
 CAPABILITIES_FILE = PROJECT_ROOT / "system_capabilities.json"
 
-WHISPER = PROJECT_ROOT / 'third_party' / 'whisper.cpp' / 'build' / 'bin' / 'whisper-cli'
-MODEL = PROJECT_ROOT / 'third_party' / 'whisper.cpp' / 'models' / 'ggml-breeze-asr-26.bin'
+WHISPER = pathlib.Path(os.environ.get('WHISPER_CLI') or
+                       PROJECT_ROOT / 'third_party' / 'whisper.cpp' / 'build' / 'bin' / 'whisper-cli')
+
+# MediaTek publishes two Breeze ASR models, tuned for different speech. Keep
+# both and let the caller choose per job -- whisper-cli is spawned per segment,
+# so switching is only a different -m argument.
+#
+# Filenames match the upstream repo names, which is also what
+# breeze-asr-hub's scripts/convert_model.sh --variant writes.
+MODEL_VARIANTS = {
+    '25': {'filename': 'ggml-breeze-asr-25.bin', 'summary': '台灣華語、中英夾雜'},
+    '26': {'filename': 'ggml-breeze-asr-26.bin', 'summary': '台語，輸出中文字'},
+}
+MODEL_DIR = pathlib.Path(os.environ.get('MODEL_DIR') or
+                         PROJECT_ROOT / 'third_party' / 'whisper.cpp' / 'models')
+# 26 preserves the behaviour this project has always had.
+MODEL_VARIANT = os.environ.get('MODEL_VARIANT', '26')
+
+
+def model_path(variant=None):
+    """Resolve a variant name to its .bin. Raises KeyError for unknown names."""
+    name = str(variant or MODEL_VARIANT)
+    if name not in MODEL_VARIANTS:
+        raise KeyError('未知的模型: {} (可用: {})'.format(name, ', '.join(sorted(MODEL_VARIANTS))))
+    # An explicit MODEL_PATH pins the default variant only, so setting it never
+    # makes the other model unreachable.
+    if (variant is None or name == MODEL_VARIANT) and os.environ.get('MODEL_PATH'):
+        return pathlib.Path(os.environ['MODEL_PATH'])
+    return MODEL_DIR / MODEL_VARIANTS[name]['filename']
+
+
+def available_models():
+    """Variants actually present on disk, so the UI cannot offer a missing one."""
+    out = []
+    for name in sorted(MODEL_VARIANTS):
+        p = model_path(name)
+        if p.exists():
+            out.append({'variant': name, 'summary': MODEL_VARIANTS[name]['summary'],
+                        'default': name == MODEL_VARIANT, 'path': str(p)})
+    return out
+
+
+MODEL = model_path()
 ALLOWED = {'.wav', '.mp3', '.m4a', '.flac', '.ogg'}
 
 app = Flask(__name__)
@@ -160,13 +201,16 @@ def run_whisperx_job(job_id, in_path, out_base, log_path, language, min_speakers
                 j['status'] = 'failed'
                 j['returncode'] = 1
 
-def process_job_thread(job_id, in_path, out_base, log_path, max_len, fmt):
+def process_job_thread(job_id, in_path, out_base, log_path, max_len, fmt, model_file=None):
     with lock:
         j = jobs.get(job_id)
-        
+
+    model = pathlib.Path(model_file) if model_file else MODEL
+
     try:
         with open(log_path, 'a', encoding='utf-8') as logf:
             logf.write(f"Analyzing audio: {in_path}\n")
+            logf.write(f"Model: {model.name}\n")
             logf.flush()
             
             # Use ensure_wav to convert to 16k mono wav for better processing
@@ -210,7 +254,7 @@ def process_job_thread(job_id, in_path, out_base, log_path, max_len, fmt):
             for idx, (seg_path, start_time) in enumerate(segments):
                 seg_out_base = f"{out_base}_{idx}" if len(segments) > 1 else str(out_base)
                 
-                cmd = [str(WHISPER), '-m', str(MODEL), '-f', str(seg_path), '-of', seg_out_base, '-nt']
+                cmd = [str(WHISPER), '-m', str(model), '-f', str(seg_path), '-of', seg_out_base, '-nt']
                 cmd.extend(['-l', 'zh', '-ml', str(max_len), '-sow'])
                 cmd.extend(['-et', '2.4', '-lpt', '-1.0'])
                 cmd.append('-otxt')
@@ -298,6 +342,11 @@ def get_system_capabilities():
             return jsonify(default_caps)
     return jsonify(default_caps)
 
+@app.get('/api/models')
+def list_models():
+    """Which Breeze variants are converted and usable right now."""
+    return jsonify({'ok': True, 'default': MODEL_VARIANT, 'models': available_models()})
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -333,8 +382,21 @@ def transcribe():
     min_speakers = int(min_speakers) if min_speakers and min_speakers.isdigit() else None
     max_speakers = int(max_speakers) if max_speakers and max_speakers.isdigit() else None
 
-    if not use_whisperx and (not WHISPER.exists() or not MODEL.exists()):
-        return jsonify({'ok': False, 'error': '尚未安裝模型，先執行: bash scripts/install.sh'}), 400
+    # Absent means the configured default, so callers that never send the field
+    # keep the behaviour they had.
+    variant = request.form.get('model', '').strip()
+    try:
+        model = model_path(variant or None)
+    except KeyError as exc:
+        return jsonify({'ok': False, 'error': exc.args[0]}), 400
+
+    if not use_whisperx and not WHISPER.exists():
+        return jsonify({'ok': False, 'error': '尚未編譯引擎，先執行: bash scripts/install.sh'}), 400
+    if not use_whisperx and not model.exists():
+        return jsonify({'ok': False, 'error':
+                        f'找不到模型 {model.name}。用 breeze-asr-hub 轉一顆出來：'
+                        f'scripts/fetch_model.sh --convert --variant {variant or MODEL_VARIANT}，'
+                        f'再放進 {MODEL_DIR}'}), 400
 
     upload_id = request.form.get('upload_id')
     filename = request.form.get('filename')
@@ -384,16 +446,18 @@ def transcribe():
             'id': job_id, 'status': 'running', 'start_ts': time.time(), 'pid': None,
             'proc': None, 'input_path': str(in_path), 'output_base': str(out_base),
             'log_path': str(log_path), 'returncode': None, 'requested_format': fmt,
-            'type': 'whisperx' if use_whisperx else 'whisper-cli'
+            'type': 'whisperx' if use_whisperx else 'whisper-cli',
+            'model': None if use_whisperx else (variant or MODEL_VARIANT)
         }
-        
+
     if use_whisperx:
         t = threading.Thread(
             target=run_whisperx_job,
             args=(job_id, in_path, out_base, log_path, 'zh', min_speakers, max_speakers, hf_token)
         )
     else:
-        t = threading.Thread(target=process_job_thread, args=(job_id, in_path, out_base, log_path, max_len, fmt))
+        t = threading.Thread(target=process_job_thread,
+                             args=(job_id, in_path, out_base, log_path, max_len, fmt, str(model)))
     
     t.start()
 
@@ -417,6 +481,7 @@ def job_status(job_id):
         'elapsed_sec': round(time.time() - j['start_ts'], 2),
         'returncode': j['returncode'], 'pid': j['pid'],
         'input_path': j['input_path'], 'audio_path': j.get('audio_path'),
+        'model': j.get('model'),
         'text': txt, 'log_tail': tail_text(j['log_path'], 50),
     })
 
