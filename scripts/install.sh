@@ -27,9 +27,20 @@ if [ ! -f "$ROOT_DIR/.env" ]; then
 fi
 
 # 3. 安裝 WebUI Python 依賴
+# 裝進專案自己的 .venv：Ubuntu 24.04 起，系統層 pip 會被 PEP 668 擋下
+# (externally-managed-environment)。啟動腳本會優先用這個 venv，找不到才退回
+# 系統 python3，所以既有的部署不受影響。
 echo "📦 安裝 WebUI Python 依賴套件..."
 cd "$ROOT_DIR"
-python3 -m pip install -r requirements.txt || echo "⚠️ Python 套件安裝可能不完整，請稍後檢查。"
+if [ ! -d "$ROOT_DIR/.venv" ]; then
+    python3 -m venv "$ROOT_DIR/.venv" || echo "⚠️ 無法建立 venv，改用系統 python3"
+fi
+if [ -x "$ROOT_DIR/.venv/bin/pip" ]; then
+    "$ROOT_DIR/.venv/bin/pip" install -q --upgrade pip
+    "$ROOT_DIR/.venv/bin/pip" install -r requirements.txt || echo "⚠️ Python 套件安裝可能不完整，請稍後檢查。"
+else
+    python3 -m pip install -r requirements.txt || echo "⚠️ Python 套件安裝可能不完整，請稍後檢查。"
+fi
 
 # 4. 取得 whisper.cpp (底層 Breeze 引擎)
 # third_party/ 在 .gitignore 裡，所以全新 clone 不會有這個目錄 —— 之前這裡直接

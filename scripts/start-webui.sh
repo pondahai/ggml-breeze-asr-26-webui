@@ -26,7 +26,12 @@ elif command -v ss >/dev/null; then
   fi
 fi
 
-nohup env PYTHONUNBUFFERED=1 python3 "$APP" >"$LOG" 2>&1 &
+# Prefer the project venv install.sh creates; fall back to system python3 so
+# deployments that predate it keep working.
+PY="$PROJECT_ROOT/.venv/bin/python"
+[ -x "$PY" ] || PY=python3
+
+nohup env PYTHONUNBUFFERED=1 "$PY" "$APP" >"$LOG" 2>&1 &
 sleep 1
 if command -v lsof >/dev/null; then
   lsof -i :"$PORT" || true

@@ -1,0 +1,9 @@
+# WebUI runtime dependencies. Small on purpose: transcription is done by
+# whisper.cpp, which install.sh compiles rather than pip-installing.
+#
+# ffmpeg is also required but is a system package, not a wheel:
+#   sudo apt install ffmpeg
+
+flask>=2.0,<4.0
+waitress>=2.0
+requests>=2.22
