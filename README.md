@@ -75,7 +75,9 @@ curl localhost:8013/api/models                    # 有哪幾顆可用
 bash scripts/start-all.sh
 ```
 
-接著打開瀏覽器前往：`http://<您的IP>:8012`
+接著打開瀏覽器前往：`http://<您的IP>:8013`
+
+> 姊妹專案 breeze-asr-hub 的批次服務改用 `8014`，兩者可以在同一台機器上並存。
 
 ### 網頁介面操作指南
 - **引擎切換：** 在上傳區塊可以勾選是否啟用 **WhisperX 講者分離**。
