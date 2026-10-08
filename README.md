@@ -80,3 +80,7 @@ bash scripts/start-all.sh
 ### 2. 聲紋標記 API 拋出 500 錯誤 (Internal Server Error)
 *   **原因：** 背景長期運行（數天以上）的 WhisperX 服務 (Port 8088) 在調用 `subprocess` 載入 PyTorch/Pyannote 進行發言人對齊時，可能因父進程記憶體分配鎖定或碎裂，導致系統 `fork()` 時回傳 `ENOMEM` (Cannot allocate memory) 錯誤。
 *   **解決方法：** 請 SSH 登入 Jetson Xavier，使用 `kill -9 <PID>` 關閉 Port 8088 的舊進程，並重新跑一遍啟動服務指令以重置乾淨的運行記憶體空間。
+
+### 3. 英文等外語錄音只輸出「(英文)」或被翻成中文
+*   **原因：** 原本 `/api/transcribe` 寫死 `-l zh`，而且 Breeze-ASR-26 本身對英文不穩定。
+*   **修正（2026-10-08）：** 新增 `language` 參數（預設 `zh`，網頁行為不變）。非 `zh` 時改用 Whisper large-v3-turbo（GPU）。詳見 `docs/language_routing_notes.md`。

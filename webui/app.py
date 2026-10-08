@@ -1,3 +1,4 @@
+import re
 #!/usr/bin/env python3
 from flask import Flask, request, render_template, jsonify, send_file, Response, stream_with_context
 from werkzeug.utils import secure_filename
@@ -19,6 +20,8 @@ CAPABILITIES_FILE = PROJECT_ROOT / "system_capabilities.json"
 
 WHISPER = PROJECT_ROOT / 'third_party' / 'whisper.cpp' / 'build' / 'bin' / 'whisper-cli'
 MODEL = PROJECT_ROOT / 'third_party' / 'whisper.cpp' / 'models' / 'ggml-breeze-asr-26.bin'
+# 外語（language 非 zh）改用原版 Whisper large-v3-turbo：Breeze-26 會把英文翻成中文或只標「(英文)」
+MODEL_MULTI = pathlib.Path('/media/nvidia/sd/models/whisper/ggml-large-v3-turbo.bin')
 ALLOWED = {'.wav', '.mp3', '.m4a', '.flac', '.ogg'}
 
 app = Flask(__name__)
@@ -160,7 +163,7 @@ def run_whisperx_job(job_id, in_path, out_base, log_path, language, min_speakers
                 j['status'] = 'failed'
                 j['returncode'] = 1
 
-def process_job_thread(job_id, in_path, out_base, log_path, max_len, fmt):
+def process_job_thread(job_id, in_path, out_base, log_path, max_len, fmt, language="zh"):
     with lock:
         j = jobs.get(job_id)
         
@@ -210,8 +213,10 @@ def process_job_thread(job_id, in_path, out_base, log_path, max_len, fmt):
             for idx, (seg_path, start_time) in enumerate(segments):
                 seg_out_base = f"{out_base}_{idx}" if len(segments) > 1 else str(out_base)
                 
-                cmd = [str(WHISPER), '-m', str(MODEL), '-f', str(seg_path), '-of', seg_out_base, '-nt']
-                cmd.extend(['-l', 'zh', '-ml', str(max_len), '-sow'])
+                model = MODEL if language == 'zh' or not MODEL_MULTI.exists() else MODEL_MULTI
+                logf.write(f'Model: {model.name} (language={language})' + chr(10))
+                cmd = [str(WHISPER), '-m', str(model), '-f', str(seg_path), '-of', seg_out_base, '-nt']
+                cmd.extend(['-l', language, '-ml', str(max_len), '-sow'])
                 cmd.extend(['-et', '2.4', '-lpt', '-1.0'])
                 cmd.append('-otxt')
                 if fmt == 'srt' or fmt == 'vtt':
@@ -340,6 +345,10 @@ def transcribe():
     filename = request.form.get('filename')
     fmt = request.form.get('format', 'txt')
     max_len = request.form.get('max_len', '20')
+    # 辨認語言：預設 zh（原行為）；auto 由模型自動判斷，或兩字母語言碼（en、ja…）
+    language = request.form.get('language', 'zh').strip().lower() or 'zh'
+    if language != 'auto' and not re.fullmatch(r'[a-z]{2,3}', language):
+        return jsonify({'ok': False, 'error': f'不支援的語言: {language}'}), 400
     
     if upload_id:
         ext = pathlib.Path(filename).suffix.lower()
@@ -390,10 +399,10 @@ def transcribe():
     if use_whisperx:
         t = threading.Thread(
             target=run_whisperx_job,
-            args=(job_id, in_path, out_base, log_path, 'zh', min_speakers, max_speakers, hf_token)
+            args=(job_id, in_path, out_base, log_path, None if language == 'auto' else language, min_speakers, max_speakers, hf_token)
         )
     else:
-        t = threading.Thread(target=process_job_thread, args=(job_id, in_path, out_base, log_path, max_len, fmt))
+        t = threading.Thread(target=process_job_thread, args=(job_id, in_path, out_base, log_path, max_len, fmt, language))
     
     t.start()
 
