@@ -46,3 +46,17 @@
   - `realtime-voice.service`：系統服務，:8015／:8016
   - `asr-8012.service`：使用者服務，已開 linger，實際聽 :8013
 - 記憶體：兩個模型都是每個 job 才載入，跑完就釋放，不常駐。同時跑約 5.5 GB，總共 14 GB 夠用。
+
+## 更新：合併上游、改用 Breeze-25（同日稍晚）
+- 合併 GitHub main（8/7 的 12 個 commit：支援 25／26 兩顆模型、`model` 參數、`/api/models`）。上游仍寫死 `-l zh`，language 參數重新加回。
+- 路由改為：`zh`／`en`／`auto` 用預設 Breeze 模型；其他語言碼沒指定 `model` 時用 turbo（`MULTILINGUAL_MODEL`，可用環境變數覆寫）。明確指定 `model` 時以指定為準。
+- 預設模型改 25：systemd drop-in `~/.config/systemd/user/asr-8012.service.d/model.conf` 設 `MODEL_VARIANT=25`。
+- 25 版模型取自 DGX Spark `~/breeze-asr-hub/models/ggml-breeze-asr-25.bin`（官方轉檔，md5 開頭 32ce35fc50c9），放在 `third_party/whisper.cpp/models/`。
+
+| 錄音 | Breeze-25 | Breeze-26 |
+|---|---|---|
+| 黃仁勳（英） | It's also home of some of the world's greatest computer scientists, so this is a great opportunity.（兩次相同；auto 判成 zh 但仍輸出英文） | 整段或後半翻成中文，每次不同 |
+| 馬斯克（英） | …it's 134 days I believe which ends in a few days. | It's 134 days I |
+| 白日依山盡（中） | 白日「一」山盡…（錯 1 字），12 s | 「來」日「伊」山盡…（錯 2 字），47 s |
+
+結論：中英都用 25；26 留給台語；其他語言用 turbo。

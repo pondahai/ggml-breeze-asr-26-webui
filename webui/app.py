@@ -1,8 +1,7 @@
-import re
 #!/usr/bin/env python3
 from flask import Flask, request, render_template, jsonify, send_file, Response, stream_with_context
 from werkzeug.utils import secure_filename
-import subprocess, time, uuid, pathlib, threading, os, signal, json, requests
+import subprocess, time, uuid, pathlib, threading, os, signal, json, requests, re
 
 # Utilities for smart splitting
 from audio_utils import get_audio_duration, find_silences, calculate_splits, split_audio, merge_subtitles, merge_texts
@@ -18,11 +17,65 @@ LOG_DIR.mkdir(exist_ok=True)
 
 CAPABILITIES_FILE = PROJECT_ROOT / "system_capabilities.json"
 
-WHISPER = PROJECT_ROOT / 'third_party' / 'whisper.cpp' / 'build' / 'bin' / 'whisper-cli'
-MODEL = PROJECT_ROOT / 'third_party' / 'whisper.cpp' / 'models' / 'ggml-breeze-asr-26.bin'
-# 外語（language 非 zh）改用原版 Whisper large-v3-turbo：Breeze-26 會把英文翻成中文或只標「(英文)」
-MODEL_MULTI = pathlib.Path('/media/nvidia/sd/models/whisper/ggml-large-v3-turbo.bin')
+WHISPER = pathlib.Path(os.environ.get('WHISPER_CLI') or
+                       PROJECT_ROOT / 'third_party' / 'whisper.cpp' / 'build' / 'bin' / 'whisper-cli')
+
+# MediaTek publishes two Breeze ASR models, tuned for different speech. Keep
+# both and let the caller choose per job -- whisper-cli is spawned per segment,
+# so switching is only a different -m argument.
+#
+# Filenames match the upstream repo names, which is also what
+# breeze-asr-hub's scripts/convert_model.sh --variant writes.
+MODEL_VARIANTS = {
+    '25': {'filename': 'ggml-breeze-asr-25.bin', 'summary': '台灣華語、中英夾雜'},
+    '26': {'filename': 'ggml-breeze-asr-26.bin', 'summary': '台語，輸出中文字'},
+}
+MODEL_DIR = pathlib.Path(os.environ.get('MODEL_DIR') or
+                         PROJECT_ROOT / 'third_party' / 'whisper.cpp' / 'models')
+# 26 preserves the behaviour this project has always had.
+MODEL_VARIANT = os.environ.get('MODEL_VARIANT', '26')
+# Breeze 只訓練了中文與英文；其他語言（ja、it…）改用原版 Whisper large-v3-turbo。
+# Breeze-26 對英文不穩（會翻成中文或只標「(英文)」），25 版中英都正確，見 docs/language_routing_notes.md
+BREEZE_LANGS = {'zh', 'en', 'auto'}
+MULTILINGUAL_MODEL = pathlib.Path(os.environ.get('MULTILINGUAL_MODEL') or
+                                  '/media/nvidia/sd/models/whisper/ggml-large-v3-turbo.bin')
+
+
+def model_path(variant=None):
+    """Resolve a variant name to its .bin. Raises KeyError for unknown names."""
+    name = str(variant or MODEL_VARIANT)
+    if name not in MODEL_VARIANTS:
+        raise KeyError('未知的模型: {} (可用: {})'.format(name, ', '.join(sorted(MODEL_VARIANTS))))
+    # An explicit MODEL_PATH pins the default variant only, so setting it never
+    # makes the other model unreachable.
+    if (variant is None or name == MODEL_VARIANT) and os.environ.get('MODEL_PATH'):
+        return pathlib.Path(os.environ['MODEL_PATH'])
+    return MODEL_DIR / MODEL_VARIANTS[name]['filename']
+
+
+def available_models():
+    """Variants actually present on disk, so the UI cannot offer a missing one."""
+    out = []
+    for name in sorted(MODEL_VARIANTS):
+        p = model_path(name)
+        if p.exists():
+            out.append({'variant': name, 'summary': MODEL_VARIANTS[name]['summary'],
+                        'default': name == MODEL_VARIANT, 'path': str(p)})
+    return out
+
+
+MODEL = model_path()
 ALLOWED = {'.wav', '.mp3', '.m4a', '.flac', '.ogg'}
+
+# Default LLM endpoint. Only a starting point -- the browser sends the address
+# it wants per request, since which LLM to use is a user preference rather than
+# a property of this machine. .env's GEMMA_LLM_API_URL was previously ignored
+# entirely; the address was hardcoded in two places.
+LLM_API_URL = (os.environ.get('GEMMA_LLM_API_URL') or 'http://127.0.0.1:18082').rstrip('/')
+LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', '')
+# Fallback key for a browser that sends none. Local llama.cpp/vLLM usually need
+# no auth at all, which is why this is optional everywhere.
+LLM_API_KEY = os.environ.get('LLM_API_KEY', '')
 
 app = Flask(__name__)
 jobs = {}
@@ -163,13 +216,16 @@ def run_whisperx_job(job_id, in_path, out_base, log_path, language, min_speakers
                 j['status'] = 'failed'
                 j['returncode'] = 1
 
-def process_job_thread(job_id, in_path, out_base, log_path, max_len, fmt, language="zh"):
+def process_job_thread(job_id, in_path, out_base, log_path, max_len, fmt, model_file=None, language='zh'):
     with lock:
         j = jobs.get(job_id)
-        
+
+    model = pathlib.Path(model_file) if model_file else MODEL
+
     try:
         with open(log_path, 'a', encoding='utf-8') as logf:
             logf.write(f"Analyzing audio: {in_path}\n")
+            logf.write(f"Model: {model.name} (language={language})\n")
             logf.flush()
             
             # Use ensure_wav to convert to 16k mono wav for better processing
@@ -213,8 +269,6 @@ def process_job_thread(job_id, in_path, out_base, log_path, max_len, fmt, langua
             for idx, (seg_path, start_time) in enumerate(segments):
                 seg_out_base = f"{out_base}_{idx}" if len(segments) > 1 else str(out_base)
                 
-                model = MODEL if language == 'zh' or not MODEL_MULTI.exists() else MODEL_MULTI
-                logf.write(f'Model: {model.name} (language={language})' + chr(10))
                 cmd = [str(WHISPER), '-m', str(model), '-f', str(seg_path), '-of', seg_out_base, '-nt']
                 cmd.extend(['-l', language, '-ml', str(max_len), '-sow'])
                 cmd.extend(['-et', '2.4', '-lpt', '-1.0'])
@@ -303,6 +357,11 @@ def get_system_capabilities():
             return jsonify(default_caps)
     return jsonify(default_caps)
 
+@app.get('/api/models')
+def list_models():
+    """Which Breeze variants are converted and usable right now."""
+    return jsonify({'ok': True, 'default': MODEL_VARIANT, 'models': available_models()})
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -338,17 +397,34 @@ def transcribe():
     min_speakers = int(min_speakers) if min_speakers and min_speakers.isdigit() else None
     max_speakers = int(max_speakers) if max_speakers and max_speakers.isdigit() else None
 
-    if not use_whisperx and (not WHISPER.exists() or not MODEL.exists()):
-        return jsonify({'ok': False, 'error': '尚未安裝模型，先執行: bash scripts/install.sh'}), 400
+    # Absent means the configured default, so callers that never send the field
+    # keep the behaviour they had.
+    variant = request.form.get('model', '').strip()
+    try:
+        model = model_path(variant or None)
+    except KeyError as exc:
+        return jsonify({'ok': False, 'error': exc.args[0]}), 400
+
+    # 辨認語言：預設 zh（原行為）；auto 由模型判斷，或 2～3 字母語言碼（en、ja…）。
+    # 沒指定 model 而語言不是 Breeze 訓練過的，改用多語模型。
+    language = request.form.get('language', 'zh').strip().lower() or 'zh'
+    if language != 'auto' and not re.fullmatch(r'[a-z]{2,3}', language):
+        return jsonify({'ok': False, 'error': f'不支援的語言: {language}'}), 400
+    if not variant and language not in BREEZE_LANGS and MULTILINGUAL_MODEL.exists():
+        model, variant = MULTILINGUAL_MODEL, 'multilingual'
+
+    if not use_whisperx and not WHISPER.exists():
+        return jsonify({'ok': False, 'error': '尚未編譯引擎，先執行: bash scripts/install.sh'}), 400
+    if not use_whisperx and not model.exists():
+        return jsonify({'ok': False, 'error':
+                        f'找不到模型 {model.name}。用 breeze-asr-hub 轉一顆出來：'
+                        f'scripts/fetch_model.sh --convert --variant {variant or MODEL_VARIANT}，'
+                        f'再放進 {MODEL_DIR}'}), 400
 
     upload_id = request.form.get('upload_id')
     filename = request.form.get('filename')
     fmt = request.form.get('format', 'txt')
     max_len = request.form.get('max_len', '20')
-    # 辨認語言：預設 zh（原行為）；auto 由模型自動判斷，或兩字母語言碼（en、ja…）
-    language = request.form.get('language', 'zh').strip().lower() or 'zh'
-    if language != 'auto' and not re.fullmatch(r'[a-z]{2,3}', language):
-        return jsonify({'ok': False, 'error': f'不支援的語言: {language}'}), 400
     
     if upload_id:
         ext = pathlib.Path(filename).suffix.lower()
@@ -393,16 +469,18 @@ def transcribe():
             'id': job_id, 'status': 'running', 'start_ts': time.time(), 'pid': None,
             'proc': None, 'input_path': str(in_path), 'output_base': str(out_base),
             'log_path': str(log_path), 'returncode': None, 'requested_format': fmt,
-            'type': 'whisperx' if use_whisperx else 'whisper-cli'
+            'type': 'whisperx' if use_whisperx else 'whisper-cli',
+            'model': None if use_whisperx else (variant or MODEL_VARIANT)
         }
-        
+
     if use_whisperx:
         t = threading.Thread(
             target=run_whisperx_job,
             args=(job_id, in_path, out_base, log_path, None if language == 'auto' else language, min_speakers, max_speakers, hf_token)
         )
     else:
-        t = threading.Thread(target=process_job_thread, args=(job_id, in_path, out_base, log_path, max_len, fmt, language))
+        t = threading.Thread(target=process_job_thread,
+                             args=(job_id, in_path, out_base, log_path, max_len, fmt, str(model), language))
     
     t.start()
 
@@ -426,6 +504,7 @@ def job_status(job_id):
         'elapsed_sec': round(time.time() - j['start_ts'], 2),
         'returncode': j['returncode'], 'pid': j['pid'],
         'input_path': j['input_path'], 'audio_path': j.get('audio_path'),
+        'model': j.get('model'),
         'text': txt, 'log_tail': tail_text(j['log_path'], 50),
     })
 
@@ -462,13 +541,94 @@ def job_cancel(job_id):
                 
     return jsonify({'ok': True, 'status': 'cancelled'})
 
+def resolve_llm_url(requested=''):
+    """Which LLM server to talk to. The caller's choice wins over .env."""
+    requested = (requested or '').strip().rstrip('/')
+    if not requested:
+        return LLM_API_URL
+    # The browser hands this to us and we then fetch it, so refuse anything
+    # that is not plain http(s).
+    if not requested.startswith(('http://', 'https://')):
+        raise ValueError('API 位址必須以 http:// 或 https:// 開頭')
+    return requested
+
+
+def llm_auth_headers(api_key=''):
+    """Bearer header for endpoints that want one. Empty key -> no header."""
+    api_key = (api_key or '').strip() or LLM_API_KEY
+    return {'Authorization': f'Bearer {api_key}'} if api_key else {}
+
+
+def llm_server_models(api_url=None, api_key=''):
+    """Ask an LLM server what it serves. [] when unreachable."""
+    url = api_url or LLM_API_URL
+    try:
+        r = requests.get(f"{url}/v1/models", timeout=5, headers=llm_auth_headers(api_key))
+        if r.status_code == 200:
+            return [m.get('id') for m in r.json().get('data', []) if m.get('id')]
+    except Exception:
+        pass
+    return []
+
+
+def resolve_llm_model(requested='', api_url=None, served=None):
+    """Explicit > configured > whatever is served.
+
+    A model remembered from a previous session may not exist on the server the
+    browser is now pointed at, so honour it only if still listed.
+    """
+    requested = (requested or '').strip()
+    if served is None:
+        served = llm_server_models(api_url)
+    if requested and (not served or requested in served):
+        return requested
+    if LLM_MODEL_NAME and (not served or LLM_MODEL_NAME in served):
+        return LLM_MODEL_NAME
+    return served[0] if served else ''
+
+
+@app.post('/api/llm/models')
+def llm_models():
+    """Models a given LLM server offers.
+
+    POST rather than GET because the request may carry an API key, and a key in
+    a query string ends up in access logs, proxy logs and browser history. The
+    key is never echoed back in the response.
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        url = resolve_llm_url(data.get('api_url', ''))
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc), 'models': []}), 400
+
+    api_key = data.get('api_key', '')
+    served = llm_server_models(url, api_key)
+    wanted = (data.get('model', '') or '').strip()
+    return jsonify({
+        'ok': bool(served),
+        'models': served,
+        'default': resolve_llm_model(wanted, url, served),
+        'fallback': bool(wanted and served and wanted not in served),
+        'api_url': url,
+        'default_api_url': LLM_API_URL,
+    })
+
+
 @app.post('/api/llm')
 def llm_process():
     data = request.get_json(force=True)
     text = data.get('text', '').strip()
     action = data.get('action', 'proofread')
     custom_prompt = data.get('custom_prompt', '').strip()
-    
+
+    try:
+        api_url = resolve_llm_url(data.get('api_url', ''))
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    api_key = data.get('api_key', '')
+    model = resolve_llm_model(data.get('model', ''), api_url,
+                              llm_server_models(api_url, api_key))
+
     if not text:
         return jsonify({'ok': False, 'error': '文字內容不可為空'}), 400
         
@@ -488,8 +648,13 @@ def llm_process():
         {"role": "user", "content": text}
     ]
     
+    if not model:
+        return jsonify({'ok': False, 'error':
+                        f'LLM 伺服器沒有回報任何模型（{api_url}）。'
+                        '請確認位址正確、服務已啟動，若需要金鑰請填入。'}), 503
+
     payload = {
-        "model": "gemma-4-e2b-it",
+        "model": model,
         "messages": messages,
         "temperature": 0.3,
         "stream": True
@@ -497,9 +662,10 @@ def llm_process():
     
     def generate():
         try:
-            r = requests.post("http://127.0.0.1:18082/v1/chat/completions", json=payload, stream=True, timeout=600)
+            r = requests.post(f"{api_url}/v1/chat/completions", json=payload, stream=True,
+                              timeout=600, headers=llm_auth_headers(api_key))
             if r.status_code != 200:
-                yield f"data: {json.dumps({'error': 'Llama server returned error: ' + r.text}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'error': f'LLM 伺服器回應 {r.status_code}: ' + r.text[:300]}, ensure_ascii=False)}\n\n"
                 return
             for line in r.iter_lines():
                 if line:
@@ -528,13 +694,15 @@ def llm_process():
 
 @app.route('/api/llm/health')
 def llm_health():
-    try:
-        r = requests.get("http://127.0.0.1:18082/v1/models", timeout=3)
-        if r.status_code == 200:
-            return jsonify({'ok': True, 'status': 'online', 'model': 'gemma-4'})
-    except Exception as e:
-        pass
-    return jsonify({'ok': False, 'status': 'offline'})
+    """Liveness of the default endpoint. The panel uses /api/llm/models for the
+    address the user actually picked; this stays GET for existing callers."""
+    served = llm_server_models()
+    if served:
+        # Used to report "gemma-4" no matter what was actually running.
+        return jsonify({'ok': True, 'status': 'online', 'api_url': LLM_API_URL,
+                        'model': resolve_llm_model('', LLM_API_URL, served),
+                        'models': served})
+    return jsonify({'ok': False, 'status': 'offline', 'api_url': LLM_API_URL})
 
 if __name__ == '__main__':
     from waitress import serve

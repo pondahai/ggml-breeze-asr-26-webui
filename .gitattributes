@@ -1,0 +1,4 @@
+# Shell scripts must keep LF even when edited on Windows -- a CRLF shebang line
+# makes the kernel look for an interpreter called "bash\r", and CRLF anywhere
+# else is a syntax error the moment a line ends inside a block.
+*.sh text eol=lf

@@ -47,10 +47,23 @@ if [ -f /etc/nv_tegra_release ] || command -v tegrastats &> /dev/null; then
     GPU_VRAM_GB=$TOTAL_MEM_GB
     echo "🎮 GPU 共享記憶體: ~${GPU_VRAM_GB} GB"
 elif command -v nvidia-smi &> /dev/null; then
-    echo "🚀 設備類型: 獨立 NVIDIA 顯示卡"
     VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n 1)
-    GPU_VRAM_GB=$((VRAM_MB / 1024))
-    echo "🎮 GPU VRAM: ~${GPU_VRAM_GB} GB"
+    # 統一記憶體的機種（例如 DGX Spark 的 GB10）這裡回傳 [N/A] 而不是數字。
+    # 直接丟進 $(( )) 會讓腳本中斷，而且 gpu_vram_gb 會留在 0 —— WebUI 就會
+    # 把 WhisperX、Gemma 判成「VRAM 不足」關掉，即使機器有 121 GB 可用。
+    # 上面的共享記憶體分支只認 Jetson，GB10 不是 Jetson。
+    case "$VRAM_MB" in
+        ''|*[!0-9]*)
+            echo "🚀 設備類型: NVIDIA GPU (統一記憶體)"
+            GPU_VRAM_GB=$TOTAL_MEM_GB
+            echo "🎮 GPU 共享記憶體: ~${GPU_VRAM_GB} GB"
+            ;;
+        *)
+            echo "🚀 設備類型: 獨立 NVIDIA 顯示卡"
+            GPU_VRAM_GB=$((VRAM_MB / 1024))
+            echo "🎮 GPU VRAM: ~${GPU_VRAM_GB} GB"
+            ;;
+    esac
 else
     echo "🟨 設備類型: 未偵測到 NVIDIA GPU"
 fi
